@@ -43,7 +43,7 @@ def run_game():
 
     # Spawn Pac-Man at a safe location (away from ghosts).
     pac_x, pac_y = safe_spawn_pacman(maze_layout, ghosts)
-    pacman = PacMan(pac_x, pac_y)
+    pacman = PacMan(pac_x, pac_y, auto_play=True)
 
     font = pygame.font.SysFont(None, 36)
     running = True
