@@ -253,25 +253,50 @@ class Ghost:
     def __init__(self, x, y):
         self.x = x
         self.y = y
-        self.speed = 2  # Same speed as Pac-Man (adjust as desired)
+        self.speed = 2  # Adjust if needed
         self.direction = pygame.math.Vector2(0, 0)
         self.radius = TILE_SIZE // 2
 
     def update(self, maze, pacman):
-        # Simple chase: determine vector toward Pac-Man.
+        # Determine possible movement directions from current position.
+        possible_directions = []
+        for d in [pygame.math.Vector2(1, 0), pygame.math.Vector2(-1, 0),
+                  pygame.math.Vector2(0, 1), pygame.math.Vector2(0, -1)]:
+            new_x = self.x + d.x * self.speed
+            new_y = self.y + d.y * self.speed
+            if not self.collides_with_wall(new_x, new_y, maze):
+                possible_directions.append(d)
+        
+        # Compute target direction based on Pac-Man's relative position.
         dx = pacman.x - self.x
         dy = pacman.y - self.y
-        new_dir = pygame.math.Vector2(0, 0)
         if abs(dx) > abs(dy):
-            new_dir = pygame.math.Vector2(1, 0) if dx > 0 else pygame.math.Vector2(-1, 0)
+            target_dir = pygame.math.Vector2(1, 0) if dx > 0 else pygame.math.Vector2(-1, 0)
         else:
-            new_dir = pygame.math.Vector2(0, 1) if dy > 0 else pygame.math.Vector2(0, -1)
-        # Check if movement in new_dir is possible.
-        if not self.collides_with_wall(self.x + new_dir.x * self.speed, self.y, maze):
-            self.direction = new_dir
-        elif not self.collides_with_wall(self.x, self.y + new_dir.y * self.speed, maze):
-            self.direction = new_dir
+            target_dir = pygame.math.Vector2(0, 1) if dy > 0 else pygame.math.Vector2(0, -1)
+        
+        # Choose direction:
+        # If the target direction is available and not the reverse of the current direction, choose it.
+        if (target_dir in possible_directions and 
+            (self.direction == pygame.math.Vector2(0, 0) or target_dir != -self.direction)):
+            self.direction = target_dir
+        else:
+            # If current direction is still valid, sometimes continue; 
+            # otherwise, pick a new random valid direction (avoiding reversal if possible).
+            if self.direction in possible_directions:
+                if random.random() < 0.15:  # 15% chance to change direction at an intersection
+                    valid = [d for d in possible_directions if d != -self.direction]
+                    if valid:
+                        self.direction = random.choice(valid)
+            else:
+                valid = [d for d in possible_directions if d != -self.direction]
+                if valid:
+                    self.direction = random.choice(valid)
+                elif possible_directions:
+                    self.direction = random.choice(possible_directions)
+                # If no movement is possible, the direction remains unchanged.
 
+        # Move the ghost along its chosen direction.
         new_x = self.x + self.direction.x * self.speed
         new_y = self.y + self.direction.y * self.speed
         if not self.collides_with_wall(new_x, self.y, maze):
@@ -296,6 +321,7 @@ class Ghost:
 
     def draw(self, surface):
         pygame.draw.circle(surface, WHITE, (int(self.x), int(self.y)), self.radius)
+
 
 # ---------------------------------------
 # 7) Main Game Loop
