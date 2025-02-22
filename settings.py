@@ -1,7 +1,7 @@
 # settings.py
-TILE_SIZE = 40
-ROWS = 21
-COLS = 31
+TILE_SIZE = 50
+ROWS = 25
+COLS = 25
 FPS = 60
 PACMAN_YELLOW = (255, 255, 0)
 WALL_BLUE = (33, 33, 222)

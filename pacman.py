@@ -18,6 +18,10 @@ class PacMan:
         self.mouth_open = True
         self.mouth_timer = pygame.time.get_ticks()
         self.mouth_interval = 200  # milliseconds between state toggles
+        
+        # Power-up: When fruit is eaten, double speed for 5 seconds.
+        # powerup_end stores the game time (in ms) when the effect ends.
+        self.powerup_end = 0
 
     def handle_keys(self):
         keys = pygame.key.get_pressed()
@@ -54,8 +58,12 @@ class PacMan:
                                                self.y + self.intended_direction.y * self.speed, maze):
                     self.direction = self.intended_direction
 
-        new_x = self.x + self.direction.x * self.speed
-        new_y = self.y + self.direction.y * self.speed
+        current_time = pygame.time.get_ticks()
+        # Use effective speed: double if power-up is active.
+        effective_speed = self.speed * 2 if current_time < self.powerup_end else self.speed
+        
+        new_x = self.x + self.direction.x * effective_speed
+        new_y = self.y + self.direction.y * effective_speed
         if not self.collides_with_wall(new_x, self.y, maze):
             self.x = new_x
         if not self.collides_with_wall(self.x, new_y, maze):
@@ -64,7 +72,6 @@ class PacMan:
         self.check_for_collection(maze)
 
         # Update mouth animation (toggle state every mouth_interval ms)
-        current_time = pygame.time.get_ticks()
         if current_time - self.mouth_timer > self.mouth_interval:
             self.mouth_open = not self.mouth_open
             self.mouth_timer = current_time
@@ -93,24 +100,49 @@ class PacMan:
         if (row, col) in maze.fruits:
             maze.fruits.remove((row, col))
             self.score += FRUIT_SCORE
+            current_time = pygame.time.get_ticks()
+            # Extend power-up duration: add 5000 ms (5 seconds) from now,
+            # or extend existing power-up if already active.
+            self.powerup_end = max(self.powerup_end, current_time) + 5000
 
     def draw(self, surface):
-        # If moving and mouth is open, draw Pac-Man with an open mouth
+        """
+        Draw Pac-Man with a simple mouth animation:
+        - If mouth_open and Pac-Man is moving, draw a wedge to simulate an open mouth.
+        - Otherwise, draw a full circle (closed mouth).
+        """
         if self.mouth_open and (self.direction.x != 0 or self.direction.y != 0):
             angle = math.atan2(self.direction.y, self.direction.x)
-            # Draw full circle first
+
+            # Draw full yellow circle
             pygame.draw.circle(surface, PACMAN_YELLOW, (int(self.x), int(self.y)), self.radius)
-            # Set mouth opening (half-angle of the wedge)
-            open_angle = math.radians(30)
-            # Compute left and right boundary points for the mouth wedge
+
+            # Set mouth opening to ~35 degrees on each side.
+            mouth_angle = 35
+            open_angle = math.radians(mouth_angle)
+
             left_angle = angle + open_angle
             right_angle = angle - open_angle
-            left_point = (int(self.x + self.radius * math.cos(left_angle)),
-                          int(self.y + self.radius * math.sin(left_angle)))
-            right_point = (int(self.x + self.radius * math.cos(right_angle)),
-                           int(self.y + self.radius * math.sin(right_angle)))
-            # Draw a black triangle to simulate an open mouth
-            pygame.draw.polygon(surface, BLACK, [(int(self.x), int(self.y)), left_point, right_point])
+
+            # Extend the wedge slightly beyond Pac-Man's normal radius to cover the border.
+            wedge_radius = self.radius + 3
+
+            left_point = (
+                int(self.x + wedge_radius * math.cos(left_angle)),
+                int(self.y + wedge_radius * math.sin(left_angle))
+            )
+            right_point = (
+                int(self.x + wedge_radius * math.cos(right_angle)),
+                int(self.y + wedge_radius * math.sin(right_angle))
+            )
+
+            # Draw a black triangle to "cut out" the mouth wedge.
+            pygame.draw.polygon(surface, BLACK, [
+                (int(self.x), int(self.y)),
+                left_point,
+                right_point
+            ])
+
         else:
-            # Closed mouth: just a full circle
+            # Draw closed mouth (full circle).
             pygame.draw.circle(surface, PACMAN_YELLOW, (int(self.x), int(self.y)), self.radius)
