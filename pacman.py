@@ -102,6 +102,50 @@ class PacMan:
                             return True
         return False
 
+    # def check_for_collection(self, maze):
+    #     reward = 0.0
+    #     row = int(self.y // TILE_SIZE)
+    #     col = int(self.x // TILE_SIZE)
+
+    #     # print(f"Pac-Man Position: ({row}, {col})")
+    #     # print(f"Pellets Before: {len(maze.pellets)}")
+
+    #     if (row, col) in maze.pellets:
+    #         maze.pellets.remove((row, col))
+    #         reward += PELLET_SCORE  # Assume PELLET_SCORE is defined (e.g., 5)
+    #         # print(f"✅ Pellet collected at ({row}, {col})!")
+    #     if (row, col) in maze.fruits:
+    #         maze.fruits.remove((row, col))
+    #         reward += FRUIT_SCORE  # Assume FRUIT_SCORE is defined (e.g., 10)
+    #         current_time = pygame.time.get_ticks()
+    #         self.powerup_end = max(self.powerup_end, current_time) + 5000
+    #         # print(f"🍏 Fruit collected at ({row}, {col})!")
+
+    #     # print(f"Pellets After: {len(maze.pellets)}")
+    #     return reward
+
+
+    # def check_for_collection(self, maze):
+    #     row = int(self.y // TILE_SIZE)
+    #     col = int(self.x // TILE_SIZE)
+
+    #     print(f"Pac-Man Position: {row}, {col}")
+    #     print(f"Pellets Before: {len(maze.pellets)}")
+
+    #     if (row, col) in maze.pellets:
+    #         maze.pellets.remove((row, col))
+    #         self.score += PELLET_SCORE
+    #         print(f"✅ Pellet collected at {row}, {col}")
+
+    #     if (row, col) in maze.fruits:
+    #         maze.fruits.remove((row, col))
+    #         self.score += FRUIT_SCORE
+    #         current_time = pygame.time.get_ticks()
+    #         self.powerup_end = max(self.powerup_end, current_time) + 5000
+    #         print(f"🍏 Fruit collected at {row}, {col}")
+
+    #    print(f"Pellets After: {len(maze.pellets)}")
+
     def check_for_collection(self, maze):
         row = int(self.y // TILE_SIZE)
         col = int(self.x // TILE_SIZE)
