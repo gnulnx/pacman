@@ -49,7 +49,6 @@ class PacMan:
         # If auto_play is enabled, update intended_direction automatically.
         if self.auto_play:
             self.auto_navigate(maze)
-        
         tolerance = 5  # Allowable misalignment (in pixels) for turning
         # Looser turning logic:
         if self.intended_direction != self.direction:

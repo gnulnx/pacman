@@ -20,9 +20,9 @@ LATEST_CHECKPOINT_PATH = "pacman_dqn_latest.pth"   # Stores the latest model (ca
 HEADLESS = False              # For evaluation, you might want rendering.
 DEBUG = False                 # Extra per-step debug rendering.
 RENDER_EVERY = 10             # Render final frame every N episodes during training.
-FIXED_MAZE = True             # Use a fixed maze layout for initial episodes.
-NUM_EPISODES = 2000           # Total training episodes.
-MAX_STEPS_PER_EPISODE = 200   # Maximum steps per episode.
+FIXED_MAZE = False             # Use a fixed maze layout for initial episodes.
+NUM_EPISODES = 10000           # Total training episodes.
+MAX_STEPS_PER_EPISODE = 25000   # Maximum steps per episode.
 TARGET_UPDATE_FREQ = 1000     # Frequency (in steps) to update target network.
 
 # DQN and training hyperparameters:
@@ -31,21 +31,23 @@ ACTION_DIM = 4                # 0 = up, 1 = down, 2 = left, 3 = right.
 LR = 1e-3
 GAMMA = 0.99
 BATCH_SIZE = 32
-BUFFER_CAPACITY = 10000
-EPSILON_START = 0.1
-EPSILON_END = 0.01
+INITIAL_BUFFER_SIZE = 10000  # Start training after this many steps.
+BUFFER_CAPACITY = 100000
+EPSILON_START = 1.0
+EPSILON_LOAD_OVERWRITE = True  # If True, will overwrite epsilon from checkpoint.
+EPSILON_END = 0.001
 EPSILON_DECAY = 0.995
 
 # Pygame screen and game settings:
 from settings import ROWS, COLS, TILE_SIZE, BLACK
 # For our test, override ROWS and COLS:
-ROWS = 12
-COLS = 12
+ROWS = 16
+COLS = 16
 
 # For reproducibility:
-random.seed(42)
-np.random.seed(42)
-torch.manual_seed(42)
+# random.seed(42)
+# np.random.seed(42)
+# torch.manual_seed(42)
 
 # For headless mode, set the SDL video driver if desired.
 if MODE == "train" and HEADLESS:
@@ -62,7 +64,7 @@ FIXED_MAZE_LAYOUT = generate_maze(ROWS, COLS)
 # -----------------------------
 from pacman import PacMan
 from ghost import Ghost  # Future use.
-from maze import Maze, get_open_cells
+from maze import Maze, get_open_cells, safe_spawn_pacman
 
 # -----------------------------
 # Pacman Environment
@@ -72,6 +74,7 @@ class PacmanEnv:
         self.fixed_maze = fixed_maze
         self.screen_width = COLS * TILE_SIZE
         self.screen_height = ROWS * TILE_SIZE
+        print(f"Screen size: {self.screen_width}x{self.screen_height}")
         pygame.display.set_caption("Pac-Man RL")
         self.screen = pygame.display.set_mode((self.screen_width, self.screen_height))
         self.reset()
@@ -80,15 +83,27 @@ class PacmanEnv:
         if self.fixed_maze:
             maze_layout = FIXED_MAZE_LAYOUT
         else:
-            maze_layout = generate_maze(12, 12)
+            maze_layout = generate_maze(ROWS, COLS)
         self.maze_obj = Maze(maze_layout)
         open_cells = get_open_cells(maze_layout)
         if not open_cells:
             raise Exception("No open cells in maze!")
-        self.ghosts = []  # Not used currently.
+        
+        ghosts = []
+        ghost_cells = open_cells[:]  # copy list
+        random.shuffle(ghost_cells)
+        for _ in range(3):
+            if ghost_cells:
+                cell = ghost_cells.pop()
+                ghost_x = cell[1] * TILE_SIZE + TILE_SIZE // 2
+                ghost_y = cell[0] * TILE_SIZE + TILE_SIZE // 2
+                ghosts.append(Ghost(ghost_x, ghost_y))
+        self.ghosts = ghosts
+
         pac_cell = random.choice(open_cells)
         pac_x = pac_cell[1] * TILE_SIZE + TILE_SIZE // 2
         pac_y = pac_cell[0] * TILE_SIZE + TILE_SIZE // 2
+        pac_x, pac_y = safe_spawn_pacman(maze_layout, ghosts)
         self.pacman = PacMan(pac_x, pac_y)
         self.done = False
         directions = [
@@ -136,21 +151,36 @@ class PacmanEnv:
 
         self.pacman.update(self.maze_obj)
 
+        for ghost in self.ghosts:
+            ghost.update(self.maze_obj, self.pacman)
+
+        # Check for collisions between Pac-Man and ghosts.
+        for ghost in self.ghosts:
+            distance = math.hypot(self.pacman.x - ghost.x, self.pacman.y - ghost.y)
+            if distance < self.pacman.radius + ghost.radius:
+                # Collision detected: end the episode and add a penalty.
+                self.done = True
+                reward -= 10  # Adjust this penalty value as needed.
+                break
+
         # self.pacman.check_for_collection(self.maze_obj)
 
         post_pellot = len(self.maze_obj.pellets)
         fruit_post = len(self.maze_obj.fruits)
 
         pellets_collected = pre_pellet - post_pellot
-        reward += pellets_collected * 5
+        reward += pellets_collected * 1
 
         fruits_collected = pre_fruits - fruit_post
-        reward += fruits_collected * 10
+        reward += fruits_collected * 1.5
+
+        # if pellets_collected == 0 or fruits_collected == 0:
+        #     reward -= 0.01  # Small step penalty to encourage efficiency
 
         # This is useful for small boards or if there is enough time to clear the board
-        if post_pellot == 0:
-            reward += 50
-            self.done = True
+        # if post_pellot == 0:
+        #     reward += 10
+        #     self.done = True
 
         # print(pre_pellet, post_pellot, pellets_collected, reward)
         # input()
@@ -159,19 +189,22 @@ class PacmanEnv:
         # if new_tile == self.old_tile:
         #     reward -= 0.2
         # self.old_tile = new_tile
-        # dist_after = self.distance_to_nearest_pellet()
+        dist_after = self.distance_to_nearest_pellet()
 
-        # delta = dist_before - dist_after
-        # if delta > 0:
-        #     reward += 0.5
-        # elif delta < 0:
-        #     reward -= 0.5
+        delta = dist_before - dist_after
 
-        if DEBUG and not HEADLESS:
-            self.render()
-            pygame.time.delay(30)
-        else:
+        if delta > 0:
+            reward += 0.55
+        elif delta < 0:
+            reward -= 0.75
+
+        # Draw the next frame
+        if HEADLESS:
             self.draw_offscreen()
+        else:
+            self.render()
+
+        # Get the next predicted state
         next_state = self.get_state()
         return next_state, reward, self.done, {}
 
@@ -184,18 +217,21 @@ class PacmanEnv:
         self.screen.fill(BLACK)
         self.maze_obj.draw(self.screen)
         self.pacman.draw(self.screen)
+        for ghost in self.ghosts:
+            ghost.draw(self.screen)
         pygame.display.flip()
 
     def get_state(self):
-        if HEADLESS:
-            self.draw_offscreen()
-        else:
-            self.render()
         image = pygame.surfarray.array3d(self.screen)
         image = np.transpose(image, (1, 0, 2))
         image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         image = cv2.resize(image, (84, 84))
         image = image.astype(np.float32) / 255.0
+
+        if DEBUG:
+            cv2.imshow("State", image)
+            input("Check image state. Press Enter to continue...")
+
         return np.expand_dims(image, axis=0)
 
     def close(self):
@@ -247,7 +283,10 @@ class ReplayBuffer:
 # -----------------------------
 # Initialize DQN, Replay Buffer, Optimizer
 # -----------------------------
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+print(f"Using device: {device}")  # This should print "Using device: mps"
+
 policy_net = DQN(INPUT_CHANNELS, ACTION_DIM).to(device)
 target_net = DQN(INPUT_CHANNELS, ACTION_DIM).to(device)
 target_net.load_state_dict(policy_net.state_dict())
@@ -264,6 +303,8 @@ if os.path.exists(BEST_CHECKPOINT_PATH):
     policy_net.load_state_dict(checkpoint["model_state"])
     target_net.load_state_dict(policy_net.state_dict())
     epsilon = checkpoint.get("epsilon", EPSILON_START)
+    if EPSILON_LOAD_OVERWRITE:
+        epsilon=EPSILON_START
     best_avg_reward = checkpoint.get("best_avg_reward", float('-inf'))
     print(f"🏆 Resumed from best checkpoint with epsilon {epsilon:.3f} and best_avg_reward {best_avg_reward:.2f}.")
 elif os.path.exists(LATEST_CHECKPOINT_PATH):
@@ -271,6 +312,8 @@ elif os.path.exists(LATEST_CHECKPOINT_PATH):
     policy_net.load_state_dict(checkpoint["model_state"])
     target_net.load_state_dict(policy_net.state_dict())
     epsilon = checkpoint.get("epsilon", EPSILON_START)
+    if EPSILON_LOAD_OVERWRITE:
+        epsilon=EPSILON_START
     print(f"📌 Resumed from latest checkpoint with epsilon {epsilon:.3f}.")
 else:
     print("🚨 No checkpoint found. Starting from scratch.")
@@ -285,9 +328,11 @@ def select_action(state, epsilon):
             return q_values.argmax().item()
 
 def train_step():
-    if len(replay_buffer) < BATCH_SIZE:
+    if len(replay_buffer) < INITIAL_BUFFER_SIZE:
         return
+    
     states, actions, rewards, next_states, dones = replay_buffer.sample(BATCH_SIZE)
+
     states = torch.tensor(states, dtype=torch.float32).to(device)
     actions = torch.tensor(actions, dtype=torch.long).unsqueeze(1).to(device)
     rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to(device)
@@ -302,6 +347,22 @@ def train_step():
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
+
+
+def get_action_from_direction(direction):
+    """
+    Convert pygame.Vector2 direction into the corresponding action index.
+    """
+    if direction == pygame.math.Vector2(0, -1):
+        return 0  # Up
+    elif direction == pygame.math.Vector2(0, 1):
+        return 1  # Down
+    elif direction == pygame.math.Vector2(-1, 0):
+        return 2  # Left
+    elif direction == pygame.math.Vector2(1, 0):
+        return 3  # Right
+    else:
+        return random.randint(0, 3)  # Default: random move if unknown direction
 
 # -----------------------------
 # Training Loop
@@ -319,15 +380,28 @@ def train_dqn():
         steps = 0
 
         while not done and steps < MAX_STEPS_PER_EPISODE:
-            action = select_action(state, epsilon)
+            # action = select_action(state, epsilon)
+            # next_state, reward, done, _ = env.step(action)
+            # episode_reward += reward
+            # steps += 1
+
+            # replay_buffer.push(state, action, reward, next_state, done)
+            # state = next_state
+
+            if len(replay_buffer) < INITIAL_BUFFER_SIZE:  # Use BFS navigation until buffer fills
+                env.pacman.auto_navigate(env.maze_obj)  # Use auto-navigation
+                action = get_action_from_direction(env.pacman.intended_direction)
+            else:
+                action = select_action(state, epsilon)  # Use trained policy
+
             next_state, reward, done, _ = env.step(action)
             episode_reward += reward
             steps += 1
-
             replay_buffer.push(state, action, reward, next_state, done)
-            state = next_state
+
 
             train_step()
+            # print("normal trainig has ensued")
             total_steps += 1
 
             if total_steps % TARGET_UPDATE_FREQ == 0:
@@ -345,7 +419,7 @@ def train_dqn():
 
         if episode > 0 and episode % 10 == 0:
             avg_reward = sum(episode_rewards[-10:]) / 10.0
-            print(f"Average reward over last 10 episodes: {avg_reward:.2f}")
+            print(f"Average reward over last 10 episodes: {avg_reward:.2f} - best so far: {best_avg_reward:.2f}")
             # Save latest checkpoint (always update latest)
             latest_checkpoint = {"model_state": policy_net.state_dict(), "epsilon": epsilon}
             torch.save(latest_checkpoint, LATEST_CHECKPOINT_PATH)
@@ -374,9 +448,9 @@ def play_dqn(num_episodes=10):
         return
 
     # Override epsilon to 0 in play mode
-    play_epsilon = 0.0
+    play_epsilon = 0.01
 
-    env = PacmanEnv(fixed_maze=False)
+    env = PacmanEnv(fixed_maze=True)
     for episode in range(num_episodes):
         state = env.reset()
         done = False
