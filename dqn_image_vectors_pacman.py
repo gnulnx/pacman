@@ -22,21 +22,26 @@ DEBUG = False                 # Extra per-step debug rendering.
 RENDER_EVERY = 10             # Render final frame every N episodes during training.
 FIXED_MAZE = False             # Use a fixed maze layout for initial episodes.
 NUM_EPISODES = 10000           # Total training episodes.
-MAX_STEPS_PER_EPISODE = 25000   # Maximum steps per episode.
+MAX_STEPS_PER_EPISODE = 5000   # Maximum steps per episode.
 TARGET_UPDATE_FREQ = 1000     # Frequency (in steps) to update target network.
 
 # DQN and training hyperparameters:
 INPUT_CHANNELS = 1
 ACTION_DIM = 4                # 0 = up, 1 = down, 2 = left, 3 = right.
-LR = 1e-3
+# LR = 1e-3
+LR = 0.00025  # original value from Atari paper
 GAMMA = 0.99
-BATCH_SIZE = 32
-INITIAL_BUFFER_SIZE = 10000  # Start training after this many steps.
-BUFFER_CAPACITY = 100000
+BATCH_SIZE = 64
+INITIAL_BUFFER_SIZE = 50000  # Start training after this many steps.
+BUFFER_CAPACITY = 1000000
 EPSILON_START = 1.0
 EPSILON_LOAD_OVERWRITE = True  # If True, will overwrite epsilon from checkpoint.
 EPSILON_END = 0.001
-EPSILON_DECAY = 0.995
+EPSILON_DECAY = 0.998
+
+FRAME_STACK_SIZE = 4  # Number of consecutive frames to stack
+INPUT_CHANNELS = FRAME_STACK_SIZE  # Instead of 1, now we have 4 channels
+
 
 # Pygame screen and game settings:
 from settings import ROWS, COLS, TILE_SIZE, BLACK
@@ -77,6 +82,8 @@ class PacmanEnv:
         print(f"Screen size: {self.screen_width}x{self.screen_height}")
         pygame.display.set_caption("Pac-Man RL")
         self.screen = pygame.display.set_mode((self.screen_width, self.screen_height))
+        self.frame_stack = deque(maxlen=FRAME_STACK_SIZE)  # For frame stacking
+
         self.reset()
 
     def reset(self):
@@ -84,6 +91,7 @@ class PacmanEnv:
             maze_layout = FIXED_MAZE_LAYOUT
         else:
             maze_layout = generate_maze(ROWS, COLS)
+
         self.maze_obj = Maze(maze_layout)
         open_cells = get_open_cells(maze_layout)
         if not open_cells:
@@ -114,7 +122,15 @@ class PacmanEnv:
         ]
         self.last_direction = random.choice(directions)
         self.old_tile = (int(pac_y // TILE_SIZE), int(pac_x // TILE_SIZE))
-        return self.get_state()
+        # return self.get_state()
+    
+        # Get the initial frame and fill the frame stack
+        initial_frame = self._get_frame()
+        self.frame_stack.clear()
+        for _ in range(FRAME_STACK_SIZE):
+            self.frame_stack.append(initial_frame)
+        
+        return self._get_stacked_state()
 
     def distance_to_nearest_pellet(self):
         if not self.maze_obj.pellets:
@@ -174,29 +190,15 @@ class PacmanEnv:
         fruits_collected = pre_fruits - fruit_post
         reward += fruits_collected * 1.5
 
-        # if pellets_collected == 0 or fruits_collected == 0:
-        #     reward -= 0.01  # Small step penalty to encourage efficiency
+        # Distance based learning. off whiel we try frame stacking...
+        # dist_after = self.distance_to_nearest_pellet()
 
-        # This is useful for small boards or if there is enough time to clear the board
-        # if post_pellot == 0:
-        #     reward += 10
-        #     self.done = True
+        # delta = dist_before - dist_after
 
-        # print(pre_pellet, post_pellot, pellets_collected, reward)
-        # input()
-        
-        # new_tile = (int(self.pacman.y // TILE_SIZE), int(self.pacman.x // TILE_SIZE))
-        # if new_tile == self.old_tile:
-        #     reward -= 0.2
-        # self.old_tile = new_tile
-        dist_after = self.distance_to_nearest_pellet()
-
-        delta = dist_before - dist_after
-
-        if delta > 0:
-            reward += 0.55
-        elif delta < 0:
-            reward -= 0.75
+        # if delta > 0:
+        #     reward += 0.55
+        # elif delta < 0:
+        #     reward -= 0.75
 
         # Draw the next frame
         if HEADLESS:
@@ -205,8 +207,29 @@ class PacmanEnv:
             self.render()
 
         # Get the next predicted state
-        next_state = self.get_state()
+        # next_state = self.get_state()
+        # return next_state, reward, self.done, {}
+    
+        new_frame = self._get_frame()
+        self.frame_stack.append(new_frame)
+        next_state = self._get_stacked_state()
         return next_state, reward, self.done, {}
+
+    def _get_frame(self):
+        """Capture the current screen as a grayscale image."""
+        image = pygame.surfarray.array3d(self.screen)
+        image = np.transpose(image, (1, 0, 2))
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        image = cv2.resize(image, (84, 84))
+        image = image.astype(np.float32) / 255.0
+        return image  # shape: (84, 84)
+
+    def _get_stacked_state(self):
+        """Stack the frames along the channel dimension."""
+        # Convert the deque to a numpy array with shape (FRAME_STACK_SIZE, 84, 84)
+        stacked_state = np.array(self.frame_stack)
+        # Optionally add a batch dimension if needed later: (1, FRAME_STACK_SIZE, 84, 84)
+        return stacked_state
 
     def draw_offscreen(self):
         self.screen.fill(BLACK)
@@ -330,7 +353,6 @@ def select_action(state, epsilon):
 def train_step():
     if len(replay_buffer) < INITIAL_BUFFER_SIZE:
         return
-    
     states, actions, rewards, next_states, dones = replay_buffer.sample(BATCH_SIZE)
 
     states = torch.tensor(states, dtype=torch.float32).to(device)
@@ -370,31 +392,34 @@ def get_action_from_direction(direction):
 def train_dqn():
     global epsilon, best_avg_reward
     env = PacmanEnv(fixed_maze=FIXED_MAZE)
-    total_steps = 0
+    total_frames = 0
     episode_rewards = []
 
     for episode in range(NUM_EPISODES):
         state = env.reset()
         done = False
         episode_reward = 0
+        episodes_since_improvement = 0
+        best_window_reward = float('-inf')
+        patience = 250
         steps = 0
 
         while not done and steps < MAX_STEPS_PER_EPISODE:
-            # action = select_action(state, epsilon)
-            # next_state, reward, done, _ = env.step(action)
-            # episode_reward += reward
-            # steps += 1
-
-            # replay_buffer.push(state, action, reward, next_state, done)
-            # state = next_state
-
-            if len(replay_buffer) < INITIAL_BUFFER_SIZE:  # Use BFS navigation until buffer fills
-                env.pacman.auto_navigate(env.maze_obj)  # Use auto-navigation
-                action = get_action_from_direction(env.pacman.intended_direction)
-            else:
-                action = select_action(state, epsilon)  # Use trained policy
-
+            action = select_action(state, epsilon)
             next_state, reward, done, _ = env.step(action)
+            episode_reward += reward
+            steps += 1
+
+            replay_buffer.push(state, action, reward, next_state, done)
+            state = next_state
+
+            # if len(replay_buffer) < INITIAL_BUFFER_SIZE:  # Use BFS navigation until buffer fills
+            #     env.pacman.auto_navigate(env.maze_obj)  # Use auto-navigation
+            #     action = get_action_from_direction(env.pacman.intended_direction)
+            # else:
+            #     action = select_action(state, epsilon)  # Use trained policy
+
+            # next_state, reward, done, _ = env.step(action)
             episode_reward += reward
             steps += 1
             replay_buffer.push(state, action, reward, next_state, done)
@@ -402,17 +427,21 @@ def train_dqn():
 
             train_step()
             # print("normal trainig has ensued")
-            total_steps += 1
+            total_frames += 1
 
-            if total_steps % TARGET_UPDATE_FREQ == 0:
+            if total_frames % TARGET_UPDATE_FREQ == 0:
                 target_net.load_state_dict(policy_net.state_dict())
 
         episode_rewards.append(episode_reward)
-        print(f"Episode {episode} => Reward: {episode_reward:.2f}, Steps: {steps}, Epsilon: {epsilon:.3f}")
+        print(f"Episode {episode} => Reward: {episode_reward:.2f}, Steps: {steps}, Total Frames: {total_frames}, Replay_Buffer: {len(replay_buffer)}, Epsilon: {epsilon:.3f}")
+
+        # print(f"Episode {episode} => Reward: {episode_reward:.2f}, Steps: {steps}, Epsilon: {epsilon:.3f}")
 
         if episode % RENDER_EVERY == 0 and episode > 0:
             env.render()
             pygame.time.delay(1000)
+
+        # After 1000 iterations, we can start to decay epsilon.
 
         # Decay epsilon
         epsilon = max(EPSILON_END, epsilon * EPSILON_DECAY)
@@ -427,9 +456,16 @@ def train_dqn():
             # Save best model only if current avg_reward exceeds best_avg_reward
             if avg_reward > best_avg_reward:
                 best_avg_reward = avg_reward
+                episodes_since_improvement = 0
                 best_checkpoint = {"model_state": policy_net.state_dict(), "epsilon": epsilon, "best_avg_reward": best_avg_reward}
                 torch.save(best_checkpoint, BEST_CHECKPOINT_PATH)
                 print(f"🏆 New best model saved at episode {episode} with average reward {avg_reward:.2f}")
+            else:
+                episodes_since_improvement += 10
+            
+            if episodes_since_improvement >= patience:
+                print("Early stopping: No significant improvement in average reward.")
+                break
 
     env.close()
 
@@ -448,7 +484,7 @@ def play_dqn(num_episodes=10):
         return
 
     # Override epsilon to 0 in play mode
-    play_epsilon = 0.01
+    play_epsilon = 0.0
 
     env = PacmanEnv(fixed_maze=True)
     for episode in range(num_episodes):
@@ -461,7 +497,6 @@ def play_dqn(num_episodes=10):
             state, reward, done, _ = env.step(action)
             episode_reward += reward
             env.render()
-            pygame.time.delay(100)
             steps += 1
         print(f"Evaluation Episode {episode} finished in {steps} steps with reward {episode_reward:.2f}.")
     env.close()
