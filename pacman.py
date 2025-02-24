@@ -1,11 +1,10 @@
-# pacman.py
-from settings import TILE_SIZE, PACMAN_YELLOW, BLACK, PELLET_SCORE, FRUIT_SCORE
+from settings import TILE_SIZE, PACMAN_YELLOW, BLACK, PELLET_SCORE, FRUIT_SCORE, POWER_PELLET_SCORE
 import pygame
 import math
 from collections import deque
 
 class PacMan:
-    def __init__(self, x, y, auto_play=False):
+    def __init__(self, x, y, auto_play=False, use_dqn=False):
         self.x = x
         self.y = y
         self.speed = 2
@@ -14,21 +13,15 @@ class PacMan:
         self.radius = TILE_SIZE // 2
         self.score = 0
         self.lives = 3
-
-        # For mouth animation:
         self.mouth_open = True
         self.mouth_timer = pygame.time.get_ticks()
-        self.mouth_interval = 200  # milliseconds between state toggles
-
-        # Power-up: double speed for 5 seconds after eating fruit.
-        # powerup_end stores the game time (in ms) when the effect ends.
-        self.powerup_end = 0
-
-        # Auto-play flag: if True, Pac-Man will navigate automatically.
+        self.mouth_interval = 200  # milliseconds between toggles
+        self.powerup_end = 0       # For fruit power-up (double speed)
+        self.powerpellet_end = 0   # For power pellet effect (ghost vulnerability)
         self.auto_play = auto_play
+        self.use_dqn = use_dqn     # If True, a neural network (DQN) controls movement externally.
 
     def handle_keys(self):
-        # Only process manual keys if auto_play is off.
         if not self.auto_play:
             keys = pygame.key.get_pressed()
             new_dir = pygame.math.Vector2(0, 0)
@@ -45,12 +38,11 @@ class PacMan:
 
     def update(self, maze):
         current_time = pygame.time.get_ticks()
-        
-        # If auto_play is enabled, update intended_direction automatically.
-        if self.auto_play:
+        # If auto_play is enabled and we're NOT using the DQN controller,
+        # then use the built-in (BFS) navigation.
+        if self.auto_play and not self.use_dqn:
             self.auto_navigate(maze)
-        tolerance = 5  # Allowable misalignment (in pixels) for turning
-        # Looser turning logic:
+        tolerance = 5  # allowable misalignment for turning
         if self.intended_direction != self.direction:
             if self.intended_direction.x != 0:
                 center_y = int(self.y // TILE_SIZE) * TILE_SIZE + TILE_SIZE / 2
@@ -69,9 +61,7 @@ class PacMan:
                                                self.y + self.intended_direction.y * self.speed, maze):
                     self.direction = self.intended_direction
 
-        # Use effective speed: double if power-up is active.
         effective_speed = self.speed * 2 if current_time < self.powerup_end else self.speed
-
         new_x = self.x + self.direction.x * effective_speed
         new_y = self.y + self.direction.y * effective_speed
         if not self.collides_with_wall(new_x, self.y, maze):
@@ -81,7 +71,6 @@ class PacMan:
 
         self.check_for_collection(maze)
 
-        # Update mouth animation (toggle state every mouth_interval ms)
         if current_time - self.mouth_timer > self.mouth_interval:
             self.mouth_open = not self.mouth_open
             self.mouth_timer = current_time
@@ -101,50 +90,6 @@ class PacMan:
                             return True
         return False
 
-    # def check_for_collection(self, maze):
-    #     reward = 0.0
-    #     row = int(self.y // TILE_SIZE)
-    #     col = int(self.x // TILE_SIZE)
-
-    #     # print(f"Pac-Man Position: ({row}, {col})")
-    #     # print(f"Pellets Before: {len(maze.pellets)}")
-
-    #     if (row, col) in maze.pellets:
-    #         maze.pellets.remove((row, col))
-    #         reward += PELLET_SCORE  # Assume PELLET_SCORE is defined (e.g., 5)
-    #         # print(f"✅ Pellet collected at ({row}, {col})!")
-    #     if (row, col) in maze.fruits:
-    #         maze.fruits.remove((row, col))
-    #         reward += FRUIT_SCORE  # Assume FRUIT_SCORE is defined (e.g., 10)
-    #         current_time = pygame.time.get_ticks()
-    #         self.powerup_end = max(self.powerup_end, current_time) + 5000
-    #         # print(f"🍏 Fruit collected at ({row}, {col})!")
-
-    #     # print(f"Pellets After: {len(maze.pellets)}")
-    #     return reward
-
-
-    # def check_for_collection(self, maze):
-    #     row = int(self.y // TILE_SIZE)
-    #     col = int(self.x // TILE_SIZE)
-
-    #     print(f"Pac-Man Position: {row}, {col}")
-    #     print(f"Pellets Before: {len(maze.pellets)}")
-
-    #     if (row, col) in maze.pellets:
-    #         maze.pellets.remove((row, col))
-    #         self.score += PELLET_SCORE
-    #         print(f"✅ Pellet collected at {row}, {col}")
-
-    #     if (row, col) in maze.fruits:
-    #         maze.fruits.remove((row, col))
-    #         self.score += FRUIT_SCORE
-    #         current_time = pygame.time.get_ticks()
-    #         self.powerup_end = max(self.powerup_end, current_time) + 5000
-    #         print(f"🍏 Fruit collected at {row}, {col}")
-
-    #    print(f"Pellets After: {len(maze.pellets)}")
-
     def check_for_collection(self, maze):
         row = int(self.y // TILE_SIZE)
         col = int(self.x // TILE_SIZE)
@@ -155,15 +100,14 @@ class PacMan:
             maze.fruits.remove((row, col))
             self.score += FRUIT_SCORE
             current_time = pygame.time.get_ticks()
-            # Add 5 seconds to the power-up duration (stacking if already active)
             self.powerup_end = max(self.powerup_end, current_time) + 5000
+        if (row, col) in maze.power_pellets:
+            maze.power_pellets.remove((row, col))
+            self.score += POWER_PELLET_SCORE
+            current_time = pygame.time.get_ticks()
+            self.powerpellet_end = current_time + 8000
 
     def draw(self, surface):
-        """
-        Draw Pac-Man with a simple mouth animation:
-        - If mouth_open and Pac-Man is moving, draw a wedge to simulate an open mouth.
-        - Otherwise, draw a full circle (closed mouth).
-        """
         if self.mouth_open and (self.direction.x != 0 or self.direction.y != 0):
             angle = math.atan2(self.direction.y, self.direction.x)
             pygame.draw.circle(surface, PACMAN_YELLOW, (int(self.x), int(self.y)), self.radius)
@@ -189,14 +133,9 @@ class PacMan:
             pygame.draw.circle(surface, PACMAN_YELLOW, (int(self.x), int(self.y)), self.radius)
 
     def auto_navigate(self, maze):
-        """
-        When auto_play is enabled, use BFS to find a path from the current tile
-        to the nearest pellet or fruit and set intended_direction accordingly.
-        """
-        # Determine current tile coordinates:
+        # Original BFS-based auto-navigation (used only when not using DQN control).
         row = int(self.y // TILE_SIZE)
         col = int(self.x // TILE_SIZE)
-        # Check if Pac-Man is at the center of the tile:
         center_x = col * TILE_SIZE + TILE_SIZE / 2
         center_y = row * TILE_SIZE + TILE_SIZE / 2
         if abs(self.x - center_x) < 1 and abs(self.y - center_y) < 1:
@@ -208,12 +147,8 @@ class PacMan:
                 self.intended_direction = pygame.math.Vector2(dc, dr)
 
 def find_path_to_nearest_item(maze, start_r, start_c):
-    """
-    Perform a BFS from (start_r, start_c) to find the nearest pellet or fruit.
-    Returns a list of (row, col) coordinates representing the path (including start and target).
-    Returns None if no target is found.
-    """
-    targets = set(maze.pellets).union(set(maze.fruits))
+    from collections import deque
+    targets = set(maze.pellets).union(set(maze.fruits)).union(set(maze.power_pellets))
     if not targets:
         return None
     rows = maze.rows
@@ -225,7 +160,6 @@ def find_path_to_nearest_item(maze, start_r, start_c):
     while queue:
         r, c = queue.popleft()
         if (r, c) in targets:
-            # Reconstruct path:
             path = []
             current = (r, c)
             while current != (start_r, start_c):
@@ -234,7 +168,7 @@ def find_path_to_nearest_item(maze, start_r, start_c):
             path.append((start_r, start_c))
             path.reverse()
             return path
-        for dr, dc in [(1,0), (-1,0), (0,1), (0,-1)]:
+        for dr, dc in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
             nr, nc = r + dr, c + dc
             if 0 <= nr < rows and 0 <= nc < cols and (nr, nc) not in visited:
                 if maze.layout[nr][nc] == '0':

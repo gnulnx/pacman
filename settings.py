@@ -1,4 +1,3 @@
-# settings.py
 TILE_SIZE = 50
 ROWS = 25
 COLS = 25
@@ -11,15 +10,11 @@ PELLET_ORANGE = (255, 153, 0)
 FRUIT_RED = (255, 50, 50)
 PELLET_SCORE = 10
 FRUIT_SCORE = 50
-BLACK = (0, 0, 0)
-WALL_BLUE = (33, 33, 222)
-PACMAN_YELLOW = (255, 255, 0)
-PELLET_ORANGE = (255, 153, 0)
-FRUIT_RED = (255, 50, 50)
-WHITE = (255, 255, 255)
-
-# Scoring
 NUM_FRUITS = 5
-
-# Ghost settings
 NUM_GHOSTS = 3
+
+NUM_POWER_PELLETS = 10
+POWER_PELLET_SCORE = 100
+GHOST_SCORE = 200
+GHOST_COLOR = (0, 255, 0)          # Default ghost color (green)
+POWER_PELLET_COLOR = (255, 255, 255)   # Color for power pellets (purple)
