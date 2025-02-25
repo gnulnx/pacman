@@ -1,3 +1,4 @@
+# env.py
 import math
 import os
 import random
@@ -6,7 +7,6 @@ from collections import deque
 import cv2  # OpenCV for image processing
 import numpy as np
 import pygame
-import torch
 
 from ghost import Ghost  # Future use.
 from maze import Maze, generate_maze, get_open_cells, safe_spawn_pacman
@@ -21,17 +21,13 @@ from train.settings import (
     MODE,
     ROWS,
     TILE_SIZE,
+    USE_8BIT,
 )
 
-# csvfile = open("training_log.csv", "w", newline="")
-# writer = csv.writer(csvfile)
-# writer.writerow(["episode", "step", "total_frames", "loss", "avg_q", "epsilon", "episode_reward"])
-
-
 # For reproducibility:
-random.seed(42)
-np.random.seed(42)
-torch.manual_seed(42)
+# random.seed(42)
+# np.random.seed(42)
+# torch.manual_seed(42)
 
 # For headless mode, set the SDL video driver if desired.
 if MODE == "train" and HEADLESS:
@@ -230,8 +226,12 @@ class PacmanEnv:
         image = np.transpose(image, (1, 0, 2))
         image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         image = cv2.resize(image, (84, 84))
-        # image = image.astype(np.float32) / 255.0
-        image = image.astype(np.uint8)
+
+        if USE_8BIT:
+            image = image.astype(np.uint8)
+        else:
+            image = image.astype(np.float32) / 255.0
+
         return image  # shape: (84, 84)
 
     def _get_stacked_state(self):
@@ -259,7 +259,10 @@ class PacmanEnv:
         image = np.transpose(image, (1, 0, 2))
         image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         image = cv2.resize(image, (84, 84))
-        image = image.astype(np.float32) / 255.0
+        if USE_8BIT:
+            image = image.astype(np.uint8)
+        else:
+            image = image.astype(np.float32) / 255.0
 
         if DEBUG:
             cv2.imshow("State", image)

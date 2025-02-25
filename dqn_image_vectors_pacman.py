@@ -30,6 +30,7 @@ from train.settings import (
     MODE,
     NUM_EPISODES,
     TARGET_UPDATE_FREQ,
+    USE_8BIT,
 )
 
 csvfile = open("training_log.csv", "w", newline="")
@@ -137,8 +138,12 @@ def train_step_double_dqn(episode, total_frames, episode_reward):
         return
     states, actions, rewards, next_states, dones = replay_buffer.sample(BATCH_SIZE)
 
-    states = torch.tensor(states, dtype=torch.float32).to(device) / 2550
-    next_states = torch.tensor(next_states, dtype=torch.float32).to(device) / 255.0
+    if USE_8BIT:
+        states = torch.tensor(states, dtype=torch.float32).to(device) / 255.0
+        next_states = torch.tensor(next_states, dtype=torch.float32).to(device) / 255.0
+    else:
+        states = torch.tensor(states, dtype=torch.float32).to(device)
+        next_states = torch.tensor(next_states, dtype=torch.float32).to(device)
 
     actions = torch.tensor(actions, dtype=torch.long).unsqueeze(1).to(device)
     rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to(device)
@@ -264,6 +269,7 @@ def train_dqn():
         steps = 0
 
         while not done and steps < MAX_STEPS_PER_EPISODE:
+            # 4 frames at a time
             action = select_action(state, epsilon)
             total_reward = 0  # Accumulate rewards over skipped frames
 
@@ -276,7 +282,12 @@ def train_dqn():
             # Use only the LAST frame in the state
             replay_buffer.push(state, action, total_reward, next_state, done)
             state = next_state
+            episode_reward += total_reward
+            steps += 1
 
+            # -- End 4 frames at a time  ---
+
+            # 1 Frame at a time
             # One frame at a time
             # action = select_action(state, epsilon)
             # next_state, reward, done, _ = env.step(action)
@@ -285,6 +296,8 @@ def train_dqn():
 
             # replay_buffer.push(state, action, reward, next_state, done)
             # state = next_state
+
+            # -- end 1 frame at a time ---
 
             # BFS BUFFER FILL
             # if len(replay_buffer) < INITIAL_BUFFER_SIZE:  # Use BFS navigation until buffer fills
@@ -301,7 +314,6 @@ def train_dqn():
 
             train_step_double_dqn(episode, total_frames, episode_reward)
             # train_step(episode, total_frames, episode_reward)
-            # print("normal trainig has ensued")
             total_frames += 1
 
             if total_frames % TARGET_UPDATE_FREQ == 0:

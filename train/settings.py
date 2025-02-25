@@ -1,10 +1,11 @@
+# settings.py
 # =====================================================
 # General Settings & Modes
 # =====================================================
 MODE = "train"  # "train" or "play"
 HEADLESS = False  # For evaluation, you might want rendering.
 DEBUG = False  # Extra per-step debug rendering.
-
+USE_8BIT = True
 # =====================================================
 # Checkpoint & Logging Settings
 # =====================================================
@@ -30,7 +31,7 @@ LR = 1e-3  # Learning rate
 # LR = 0.00025                # Original value from Atari paper
 GAMMA = 0.99  # Discount factor for future rewards
 BATCH_SIZE = 32  # Number of transitions per training batch
-INITIAL_BUFFER_SIZE = 25000  # Start training after this many steps.
+INITIAL_BUFFER_SIZE = 500  # Start training after this many steps.
 BUFFER_CAPACITY = 100000  # Maximum size of the replay buffer (changed from 1,000,000)
 EPSILON_START = 1.0  # Initial epsilon for exploration
 EPSILON_LOAD_OVERWRITE = True  # If True, will overwrite epsilon from checkpoint.
