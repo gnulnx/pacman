@@ -1,4 +1,5 @@
 # env.py
+#
 import math
 import os
 import random
@@ -11,17 +12,24 @@ import pygame
 from ghost import Ghost  # Future use.
 from maze import Maze, generate_maze, get_open_cells, safe_spawn_pacman
 from pacman import PacMan
-from train.settings import (
+from train.settings import (  # noqa
     ACTION_DIM,
     BLACK,
+    CLEAR_BOARD,
     COLS,
     DEBUG,
+    EAT_GHOST_SCORE,
     FRAME_STACK_SIZE,
+    FRUIT_SCORE,
+    GHOST_CATCH_SCORE,
     HEADLESS,
     MODE,
+    MOVE_TOWARD_PELLOT,
+    PELLET_SCORE,
     ROWS,
     TILE_SIZE,
     USE_8BIT,
+    WALL_COLLISION_PENALTY,
 )
 
 # For reproducibility:
@@ -140,32 +148,24 @@ class PacmanEnv:
         return legal
 
     def step(self, action):
+        reward = 0.0
         pygame.event.pump()
         dist_before = self.distance_to_nearest_pellet()
         # legal = self.legal_actions()
 
         # Convert the chosen action to a candidate direction.
         candidate = self._action_to_direction(action, self.last_direction)
-        # new_x = self.pacman.x + candidate.x * self.pacman.speed
-        # new_y = self.pacman.y + candidate.y * self.pacman.speed
+        new_x = self.pacman.x + candidate.x * self.pacman.speed
+        new_y = self.pacman.y + candidate.y * self.pacman.speed
 
-        # If the candidate move is illegal, force a legal one if available.
-        # while action not in legal:
-        #     print(f"Illegal action {action} attempted. Legal actions: {legal}")
-        #     if self.pacman.collides_with_wall(new_x, new_y, self.maze_obj):
-        #         print("Collision detected. Adjusting direction.")
-
-        # if self.pacman.collides_with_wall(new_x, new_y, self.maze_obj):
-        #     if legal:
-        #         forced_action = random.choice(legal)
-        #         candidate = self._action_to_direction(forced_action, self.last_direction)
-        # Otherwise, if no legal moves exist, keep current direction.
+        # Wall collision penalty
+        if self.pacman.collides_with_wall(new_x, new_y, self.maze_obj):
+            reward -= WALL_COLLISION_PENALTY  # Penalize for illegal action
 
         # Update last_direction and Pac-Man’s intended_direction with the final candidate.
         self.last_direction = candidate
         self.pacman.intended_direction = candidate
 
-        reward = 0.0
         pre_pellet = len(self.maze_obj.pellets)
         pre_fruits = len(self.maze_obj.fruits)
 
@@ -178,22 +178,23 @@ class PacmanEnv:
             distance = math.hypot(self.pacman.x - ghost.x, self.pacman.y - ghost.y)
             if distance < self.pacman.radius + ghost.radius:
                 if pygame.time.get_ticks() < self.pacman.powerpellet_end:
-                    self.pacman.score += 10
+                    # self.pacman.score += 10
+                    reward += EAT_GHOST_SCORE
                     ghost_cell = random.choice(get_open_cells(self.maze_obj.layout))
                     ghost.x = ghost_cell[1] * TILE_SIZE + TILE_SIZE // 2
                     ghost.y = ghost_cell[0] * TILE_SIZE + TILE_SIZE // 2
                     ghost.vulnerable = False
                 else:
                     self.done = True
-                    reward -= 10
+                    reward -= GHOST_CATCH_SCORE
                     break
 
         post_pellet = len(self.maze_obj.pellets)
         fruit_post = len(self.maze_obj.fruits)
         pellets_collected = pre_pellet - post_pellet
-        reward += pellets_collected * 5
+        reward += pellets_collected * PELLET_SCORE
         fruits_collected = pre_fruits - fruit_post
-        reward += fruits_collected * 7.5
+        reward += fruits_collected * FRUIT_SCORE
 
         # new_tile = (int(self.pacman.y // TILE_SIZE), int(self.pacman.x // TILE_SIZE))
         # if new_tile == self.old_tile:
@@ -201,14 +202,14 @@ class PacmanEnv:
         # self.old_tile = new_tile
 
         if (not self.maze_obj.pellets) and (not self.maze_obj.fruits) and (not self.maze_obj.power_pellets):
-            reward += 50  # Bonus for clearing the board.
+            reward += CLEAR_BOARD  # Bonus for clearing the board.
             self.done = True
 
         # Distance based learning. off whiel we try frame stacking...
         dist_after = self.distance_to_nearest_pellet()
 
         if dist_after < dist_before:
-            reward += 0.1
+            reward += MOVE_TOWARD_PELLOT
 
         if HEADLESS:
             self.draw_offscreen()

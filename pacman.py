@@ -1,7 +1,17 @@
-from settings import TILE_SIZE, PACMAN_YELLOW, BLACK, PELLET_SCORE, FRUIT_SCORE, POWER_PELLET_SCORE
-import pygame
 import math
 from collections import deque
+
+import pygame
+
+from settings import (
+    BLACK,
+    FRUIT_SCORE,
+    PACMAN_YELLOW,
+    PELLET_SCORE,
+    POWER_PELLET_SCORE,
+    TILE_SIZE,
+)
+
 
 class PacMan:
     def __init__(self, x, y, auto_play=False, use_dqn=False):
@@ -16,10 +26,10 @@ class PacMan:
         self.mouth_open = True
         self.mouth_timer = pygame.time.get_ticks()
         self.mouth_interval = 200  # milliseconds between toggles
-        self.powerup_end = 0       # For fruit power-up (double speed)
-        self.powerpellet_end = 0   # For power pellet effect (ghost vulnerability)
+        self.powerup_end = 0  # For fruit power-up (double speed)
+        self.powerpellet_end = 0  # For power pellet effect (ghost vulnerability)
         self.auto_play = auto_play
-        self.use_dqn = use_dqn     # If True, a neural network (DQN) controls movement externally.
+        self.use_dqn = use_dqn  # If True, a neural network (DQN) controls movement externally.
 
     def handle_keys(self):
         if not self.auto_play:
@@ -57,8 +67,11 @@ class PacMan:
                     if not self.collides_with_wall(self.x, self.y + self.intended_direction.y * self.speed, maze):
                         self.direction = self.intended_direction
             if self.direction == pygame.math.Vector2(0, 0):
-                if not self.collides_with_wall(self.x + self.intended_direction.x * self.speed,
-                                               self.y + self.intended_direction.y * self.speed, maze):
+                if not self.collides_with_wall(
+                    self.x + self.intended_direction.x * self.speed,
+                    self.y + self.intended_direction.y * self.speed,
+                    maze,
+                ):
                     self.direction = self.intended_direction
 
         effective_speed = self.speed * 2 if current_time < self.powerup_end else self.speed
@@ -84,7 +97,7 @@ class PacMan:
         for r in range(top_tile, bottom_tile + 1):
             for c in range(left_tile, right_tile + 1):
                 if 0 <= r < maze.rows and 0 <= c < maze.cols:
-                    if maze.layout[r][c] == '1':
+                    if maze.layout[r][c] == "1":
                         wall_rect = pygame.Rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
                         if pac_rect.colliderect(wall_rect):
                             return True
@@ -105,7 +118,7 @@ class PacMan:
             maze.power_pellets.remove((row, col))
             self.score += POWER_PELLET_SCORE
             current_time = pygame.time.get_ticks()
-            self.powerpellet_end = current_time + 8000
+            self.powerpellet_end = current_time + 4000
 
     def draw(self, surface):
         if self.mouth_open and (self.direction.x != 0 or self.direction.y != 0):
@@ -118,17 +131,13 @@ class PacMan:
             wedge_radius = self.radius + 3
             left_point = (
                 int(self.x + wedge_radius * math.cos(left_angle)),
-                int(self.y + wedge_radius * math.sin(left_angle))
+                int(self.y + wedge_radius * math.sin(left_angle)),
             )
             right_point = (
                 int(self.x + wedge_radius * math.cos(right_angle)),
-                int(self.y + wedge_radius * math.sin(right_angle))
+                int(self.y + wedge_radius * math.sin(right_angle)),
             )
-            pygame.draw.polygon(surface, BLACK, [
-                (int(self.x), int(self.y)),
-                left_point,
-                right_point
-            ])
+            pygame.draw.polygon(surface, BLACK, [(int(self.x), int(self.y)), left_point, right_point])
         else:
             pygame.draw.circle(surface, PACMAN_YELLOW, (int(self.x), int(self.y)), self.radius)
 
@@ -146,8 +155,8 @@ class PacMan:
                 dc = next_tile[1] - col
                 self.intended_direction = pygame.math.Vector2(dc, dr)
 
+
 def find_path_to_nearest_item(maze, start_r, start_c):
-    from collections import deque
     targets = set(maze.pellets).union(set(maze.fruits)).union(set(maze.power_pellets))
     if not targets:
         return None
@@ -171,7 +180,7 @@ def find_path_to_nearest_item(maze, start_r, start_c):
         for dr, dc in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
             nr, nc = r + dr, c + dc
             if 0 <= nr < rows and 0 <= nc < cols and (nr, nc) not in visited:
-                if maze.layout[nr][nc] == '0':
+                if maze.layout[nr][nc] == "0":
                     visited.add((nr, nc))
                     came_from[(nr, nc)] = (r, c)
                     queue.append((nr, nc))

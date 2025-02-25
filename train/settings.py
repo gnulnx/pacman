@@ -11,6 +11,10 @@ USE_8BIT = True
 # =====================================================
 BEST_CHECKPOINT_PATH = "pacman_dqn_best.pth"  # Always stores the best model (with best_avg_reward and epsilon)
 LATEST_CHECKPOINT_PATH = "pacman_dqn_latest.pth"  # Stores the latest model (can be overwritten)
+BEST_SINGLE_CHECKPOINT_PATH = "pacman_dqn_best_single.pth"  # Checkpoint for best single-episode score
+# Options for PLAY_CHECKPOINT: "best_single", "best_avg", or "latest"
+PLAY_CHECKPOINT = "best_single"
+
 RENDER_EVERY = 10  # Render final frame every N episodes during training.
 FIXED_MAZE = True  # Use a fixed maze layout for initial episodes.
 
@@ -31,9 +35,9 @@ LR = 1e-3  # Learning rate
 # LR = 0.00025                # Original value from Atari paper
 GAMMA = 0.99  # Discount factor for future rewards
 BATCH_SIZE = 32  # Number of transitions per training batch
-INITIAL_BUFFER_SIZE = 500  # Start training after this many steps.
+INITIAL_BUFFER_SIZE = 5000  # Start training after this many steps.
 BUFFER_CAPACITY = 100000  # Maximum size of the replay buffer (changed from 1,000,000)
-EPSILON_START = 1.0  # Initial epsilon for exploration
+EPSILON_START = 0.9  # Initial epsilon for exploration
 EPSILON_LOAD_OVERWRITE = True  # If True, will overwrite epsilon from checkpoint.
 EPSILON_END = 0.001  # Minimum epsilon value
 EPSILON_DECAY = 0.995  # Epsilon decay rate per step
@@ -61,17 +65,21 @@ WHITE = (255, 255, 255)
 PELLET_ORANGE = (255, 153, 0)
 FRUIT_RED = (255, 50, 50)
 
+NUM_FRUITS = 5
+
 # =====================================================
 # Scoring & Gameplay Mechanics
 # =====================================================
 PELLET_SCORE = 10
 FRUIT_SCORE = 50
-NUM_FRUITS = 5
-NUM_GHOSTS = 3
+EAT_GHOST_SCORE = 10
+GHOST_CATCH_SCORE = 10
+CLEAR_BOARD = 50
+MOVE_TOWARD_PELLOT = 0.1
+MOVE_AWAY_FROM_PELLOT = 0.2
+WALL_COLLISION_PENALTY = -0.1
+# NUM_GHOSTS = 3
 
-NUM_POWER_PELLETS = 10
-POWER_PELLET_SCORE = 100
-GHOST_SCORE = 200
 
 # =====================================================
 # Entity Appearance Settings
