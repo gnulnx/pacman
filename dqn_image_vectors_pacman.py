@@ -1,3 +1,7 @@
+
+from pacman import PacMan
+from ghost import Ghost  # Future use.
+from maze import Maze, get_open_cells, safe_spawn_pacman
 import os
 import torch
 import torch.nn as nn
@@ -9,6 +13,10 @@ import pygame
 import math
 import cv2  # OpenCV for image processing
 import csv
+from settings import ROWS, COLS, TILE_SIZE, BLACK
+from maze import generate_maze
+
+
 csvfile = open("training_log.csv", "w", newline="")
 writer = csv.writer(csvfile)
 writer.writerow(["episode", "step", "total_frames", "loss", "avg_q", "epsilon", "episode_reward"])
@@ -36,19 +44,18 @@ LR = 1e-3
 # LR = 0.00025  # original value from Atari paper
 GAMMA = 0.99
 BATCH_SIZE = 32
-INITIAL_BUFFER_SIZE = 100  # Start training after this many steps.
-BUFFER_CAPACITY = 100000
-EPSILON_START = 0.8
+INITIAL_BUFFER_SIZE = 50000  # Start training after this many steps.
+BUFFER_CAPACITY = 1000000
+EPSILON_START = 0.9
 EPSILON_LOAD_OVERWRITE = True  # If True, will overwrite epsilon from checkpoint.
 EPSILON_END = 0.001
-EPSILON_DECAY = 0.995
+EPSILON_DECAY = 0.9999
 
 FRAME_STACK_SIZE = 4  # Number of consecutive frames to stack
 INPUT_CHANNELS = FRAME_STACK_SIZE  # Instead of 1, now we have 4 channels
 
 
 # Pygame screen and game settings:
-from settings import ROWS, COLS, TILE_SIZE, BLACK
 # For our test, override ROWS and COLS:
 ROWS = 12
 COLS = 12
@@ -65,15 +72,8 @@ if MODE == "train" and HEADLESS:
 # -----------------------------
 # Pre-generate a fixed maze layout if required.
 # -----------------------------
-from maze import generate_maze
 FIXED_MAZE_LAYOUT = generate_maze(ROWS, COLS)
 
-# -----------------------------
-# Import game modules.
-# -----------------------------
-from pacman import PacMan
-from ghost import Ghost  # Future use.
-from maze import Maze, get_open_cells, safe_spawn_pacman
 
 # -----------------------------
 # Pacman Environment
@@ -323,6 +323,44 @@ class DQN(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+class DuelingDQN(nn.Module):
+    def __init__(self, input_channels, output_dim):
+        super(DuelingDQN, self).__init__()
+        # Shared convolutional feature extractor (same as before)
+        self.conv = nn.Sequential(
+            nn.Conv2d(input_channels, 32, kernel_size=8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),
+            nn.ReLU()
+        )
+        # Compute the flattened size after conv layers
+        # (Here we assume the output size is 7x7 based on input size 84x84.)
+        self.fc_input_dim = 7 * 7 * 64
+
+        # Value stream
+        self.value_fc = nn.Sequential(
+            nn.Linear(self.fc_input_dim, 512),
+            nn.ReLU(),
+            nn.Linear(512, 1)
+        )
+        # Advantage stream
+        self.advantage_fc = nn.Sequential(
+            nn.Linear(self.fc_input_dim, 512),
+            nn.ReLU(),
+            nn.Linear(512, output_dim)
+        )
+        
+    def forward(self, x):
+        x = self.conv(x)
+        x = x.view(x.size(0), -1)  # flatten
+        value = self.value_fc(x)  # shape: [batch, 1]
+        advantage = self.advantage_fc(x)  # shape: [batch, output_dim]
+        # Combine streams: Q(s,a) = V(s) + (A(s,a) - mean(A(s,·)))
+        q = value + (advantage - advantage.mean(dim=1, keepdim=True))
+        return q
+
 # -----------------------------
 # Replay Buffer
 # -----------------------------
@@ -352,10 +390,17 @@ class ReplayBuffer:
 device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 print(f"Using device: {device}")  # This should print "Using device: mps"
 
-policy_net = DQN(INPUT_CHANNELS, ACTION_DIM).to(device)
-target_net = DQN(INPUT_CHANNELS, ACTION_DIM).to(device)
+# DuelyDQN
+policy_net = DuelingDQN(INPUT_CHANNELS, ACTION_DIM).to(device)
+target_net = DuelingDQN(INPUT_CHANNELS, ACTION_DIM).to(device)
 target_net.load_state_dict(policy_net.state_dict())
 target_net.eval()
+
+# Single DQ
+# policy_net = DQN(INPUT_CHANNELS, ACTION_DIM).to(device)
+# target_net = DQN(INPUT_CHANNELS, ACTION_DIM).to(device)
+# target_net.load_state_dict(policy_net.state_dict())
+# target_net.eval()
 optimizer = optim.Adam(policy_net.parameters(), lr=LR)
 replay_buffer = ReplayBuffer(BUFFER_CAPACITY)
 
@@ -393,6 +438,45 @@ def select_action(state, epsilon):
             return q_values.argmax().item()
 
 global_train_step = 0  # At module level
+
+def train_step_double_dqn(episode, total_frames, episode_reward):
+    global global_train_step
+    if len(replay_buffer) < INITIAL_BUFFER_SIZE:
+        return
+    states, actions, rewards, next_states, dones = replay_buffer.sample(BATCH_SIZE)
+
+    states = torch.tensor(states, dtype=torch.float32).to(device)
+    actions = torch.tensor(actions, dtype=torch.long).unsqueeze(1).to(device)
+    rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to(device)
+    next_states = torch.tensor(next_states, dtype=torch.float32).to(device)
+    dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to(device)
+
+    # Current Q-values for chosen actions:
+    q_values = policy_net(states).gather(1, actions)
+    
+    # --- Double DQN target calculation ---
+    # Use policy_net to pick the best next action:
+    best_next_actions = policy_net(next_states).argmax(1, keepdim=True)
+    # Use target_net to evaluate those best actions:
+    next_q_values = target_net(next_states).gather(1, best_next_actions)
+    # Compute the target Q-value using the Bellman equation:
+    target_q_values = rewards + GAMMA * next_q_values * (1 - dones)
+    # -------------------------------------
+
+    loss = nn.MSELoss()(q_values, target_q_values)
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    global_train_step += 1
+    if global_train_step % 100 == 0:
+        avg_q = q_values.mean().item()
+        loss_value = f"{loss.item():.4f}"
+        avg_q_value = f"{avg_q:.4f}"
+        writer.writerow([episode, global_train_step, total_frames, loss_value, avg_q_value, epsilon, episode_reward])
+        csvfile.flush()
+
 
 def train_step(episode, total_frames, episode_reward):
     global global_train_step
@@ -474,6 +558,7 @@ def train_dqn():
     global epsilon, best_avg_reward
     env = PacmanEnv(fixed_maze=FIXED_MAZE)
     total_frames = 0
+    best_episode_reward = float('-inf')
     episode_rewards = []
 
     for episode in range(NUM_EPISODES):
@@ -508,26 +593,25 @@ def train_dqn():
             # steps += 1
             # replay_buffer.push(state, action, reward, next_state, done)
 
-
-            train_step(episode, total_frames, episode_reward)
+            train_step_double_dqn(episode, total_frames, episode_reward)
+            # train_step(episode, total_frames, episode_reward)
             # print("normal trainig has ensued")
             total_frames += 1
 
             if total_frames % TARGET_UPDATE_FREQ == 0:
                 target_net.load_state_dict(policy_net.state_dict())
 
+        if best_episode_reward  < episode_reward:
+            best_episode_reward = episode_reward
+
+
         episode_rewards.append(episode_reward)
-        print(f"Episode {episode} => Reward: {episode_reward:.2f}, Steps: {steps}, Total Frames: {total_frames}, Replay_Buffer: {len(replay_buffer)}, Epsilon: {epsilon:.3f}")
+        print(f"Episode {episode} => Reward: {episode_reward:.2f}, Highest Reward: {best_episode_reward:2f} Steps: {steps}, Total Frames: {total_frames}, Replay_Buffer: {len(replay_buffer)}, Epsilon: {epsilon:.3f}")
         # print(f"Episode {episode} => Reward: {episode_reward:.2f}, Steps: {steps}, Epsilon: {epsilon:.3f}")
 
-        if episode % RENDER_EVERY == 0 and episode > 0:
-            env.render()
-            pygame.time.delay(1000)
-
-        # After 1000 iterations, we can start to decay epsilon.
-
         # Decay epsilon
-        epsilon = max(EPSILON_END, epsilon * EPSILON_DECAY)
+        if replay_buffer and len(replay_buffer) >= INITIAL_BUFFER_SIZE:
+            epsilon = max(EPSILON_END, epsilon * EPSILON_DECAY)
 
         if episode > 0 and episode % 10 == 0:
             avg_reward = sum(episode_rewards[-10:]) / 10.0
