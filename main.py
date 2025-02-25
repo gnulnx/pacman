@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 # --- Configuration for DQN auto-play ---
+AUTO_PLAY = True
 USE_DQN = True                              # Set to True to use the trained DQN for auto-play.
 MODEL_PATH = "pacman_dqn_best.pth"            # Path to the trained model checkpoint.
 INPUT_CHANNELS = 4                          # Number of input channels (frame stack size).
@@ -121,7 +122,7 @@ def run_game():
     # Spawn Pac-Man at a safe location.
     pac_x, pac_y = safe_spawn_pacman(maze_layout, ghosts)
     # If using DQN, set use_dqn=True so that internal auto-navigation is skipped.
-    pacman = PacMan(pac_x, pac_y, auto_play=True, use_dqn=USE_DQN)
+    pacman = PacMan(pac_x, pac_y, auto_play=AUTO_PLAY, use_dqn=USE_DQN)
 
     font = pygame.font.SysFont(None, 36)
     running = True
