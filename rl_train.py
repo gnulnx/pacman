@@ -10,12 +10,13 @@ import torch.optim as optim
 
 from train.dueling_dqn import DuelingDQN
 from train.env import PacmanEnv
+from train.priotized_replay_buffer import PrioritizedReplayBuffer
 from train.replay_buffer import ReplayBuffer
 from train.settings import (
     ACTION_DIM,
     BATCH_SIZE,
-    BEST_CHECKPOINT_PATH,
-    BEST_SINGLE_CHECKPOINT_PATH,  # New parameter for best single-episode checkpoint
+    BEST_AVG_CHECKPOINT_PATH,  # New path for best average model
+    BEST_SINGLE_CHECKPOINT_PATH,  # Checkpoint for best single-episode reward
     BUFFER_CAPACITY,
     EPSILON_DECAY,
     EPSILON_END,
@@ -26,14 +27,23 @@ from train.settings import (
     INITIAL_BUFFER_SIZE,
     INPUT_CHANNELS,
     LATEST_CHECKPOINT_PATH,
+    LOAD_CHECKPOINT,  # New flag to choose which checkpoint to load ("best_avg", "best_single", or "latest")
     LR,
     MAX_STEPS_PER_EPISODE,
     MODE,
+    NOISY_DECAY,
     NUM_EPISODES,
-    PLAY_CHECKPOINT,  # New setting to choose which checkpoint to use in play mode
+    PER_ALPHA,
+    PER_BETA_FRAMES,
+    PER_BETA_START,
     TARGET_UPDATE_FREQ,
     USE_8BIT,
+    USE_PRIORITY_BUFFER,
 )
+
+# Remove average_rewards.csv if it exists
+if os.path.exists("average_rewards.csv"):
+    os.remove("average_rewards.csv")
 
 csvfile = open("training_log.csv", "w", newline="")
 writer = csv.writer(csvfile)
@@ -44,9 +54,6 @@ random.seed(42)
 np.random.seed(42)
 torch.manual_seed(42)
 
-# -----------------------------
-# Initialize DQN, Replay Buffer, Optimizer
-# -----------------------------
 device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 print(f"Using device: {device}")
 
@@ -56,19 +63,39 @@ target_net.load_state_dict(policy_net.state_dict())
 target_net.eval()
 
 optimizer = optim.Adam(policy_net.parameters(), lr=LR)
-replay_buffer = ReplayBuffer(BUFFER_CAPACITY)
 
-epsilon = EPSILON_START  # Default starting epsilon
+if USE_PRIORITY_BUFFER:
+    replay_buffer = PrioritizedReplayBuffer(BUFFER_CAPACITY, PER_ALPHA)
+else:
+    replay_buffer = ReplayBuffer(BUFFER_CAPACITY)
+
+epsilon = EPSILON_START  # default starting epsilon
+
+# Global variables for tracking performance
+best_single_reward = float("-inf")
 best_avg_reward = float("-inf")
-if os.path.exists(BEST_CHECKPOINT_PATH):
-    checkpoint = torch.load(BEST_CHECKPOINT_PATH, map_location=device)
+
+# --- Load checkpoint based on the LOAD_CHECKPOINT flag ---
+if LOAD_CHECKPOINT == "best_single" and os.path.exists(BEST_SINGLE_CHECKPOINT_PATH):
+    checkpoint = torch.load(BEST_SINGLE_CHECKPOINT_PATH, map_location=device)
     policy_net.load_state_dict(checkpoint["model_state"])
     target_net.load_state_dict(policy_net.state_dict())
     epsilon = checkpoint.get("epsilon", EPSILON_START)
+    best_single_reward = float(checkpoint.get("best_single_reward", float("-inf")))
     if EPSILON_LOAD_OVERWRITE:
         epsilon = EPSILON_START
-    best_avg_reward = checkpoint.get("best_avg_reward", float("-inf"))
-    print(f"🏆 Resumed from best checkpoint with epsilon {epsilon:.3f} and best_avg_reward {best_avg_reward:.2f}.")
+    print(
+        f"🏆 Resumed from BEST SINGLE checkpoint with epsilon {epsilon:.3f} and best_single_reward {best_single_reward:.2f}."
+    )
+elif LOAD_CHECKPOINT == "best_avg" and os.path.exists(BEST_AVG_CHECKPOINT_PATH):
+    checkpoint = torch.load(BEST_AVG_CHECKPOINT_PATH, map_location=device)
+    policy_net.load_state_dict(checkpoint["model_state"])
+    target_net.load_state_dict(policy_net.state_dict())
+    epsilon = checkpoint.get("epsilon", EPSILON_START)
+    best_avg_reward = float(checkpoint.get("best_avg_reward", float("-inf")))
+    if EPSILON_LOAD_OVERWRITE:
+        epsilon = EPSILON_START
+    print(f"🏆 Resumed from BEST AVG checkpoint with epsilon {epsilon:.3f} and best_avg_reward {best_avg_reward:.2f}.")
 elif os.path.exists(LATEST_CHECKPOINT_PATH):
     checkpoint = torch.load(LATEST_CHECKPOINT_PATH, map_location=device)
     policy_net.load_state_dict(checkpoint["model_state"])
@@ -76,25 +103,22 @@ elif os.path.exists(LATEST_CHECKPOINT_PATH):
     epsilon = checkpoint.get("epsilon", EPSILON_START)
     if EPSILON_LOAD_OVERWRITE:
         epsilon = EPSILON_START
-    print(f"📌 Resumed from latest checkpoint with epsilon {epsilon:.3f}.")
+    print(f"📌 Resumed from LATEST checkpoint with epsilon {epsilon:.3f}.")
 else:
     print("🚨 No checkpoint found. Starting from scratch.")
 
 
 def select_action_with_inertia(state, epsilon, last_action=None, inertia=1.0):
-    # With probability epsilon, choose a random action
     if random.random() < epsilon:
         return random.randrange(ACTION_DIM)
-
-    # Otherwise, select the best action from the Q-network
     with torch.no_grad():
         state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
+        if USE_8BIT:
+            state_tensor = state_tensor / 255.0
         q_values = policy_net(state_tensor).squeeze()
-
-    # If we have a previous action, add a bias to it
     if last_action is not None:
         biased_q = q_values.clone()
-        biased_q[last_action] += inertia  # Increase the value of the last action
+        biased_q[last_action] += inertia
         return biased_q.argmax().item()
     else:
         return q_values.argmax().item()
@@ -106,130 +130,128 @@ def select_action(state, epsilon):
     else:
         with torch.no_grad():
             state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
+            if USE_8BIT:
+                state_tensor = state_tensor / 255.0
             q_values = policy_net(state_tensor)
             return q_values.argmax().item()
 
 
-global_train_step = 0  # At module level
+def decay_noisy_params(model, decay_factor):
+    for module in model.modules():
+        if hasattr(module, "sigma"):
+            module.sigma.data.mul_(decay_factor)
 
 
-def train_step_double_dqn(episode, total_frames, episode_reward):
+global_train_step = 0
+
+
+def train_step_double_dqn(episode, total_frames, episode_reward, beta):
     global global_train_step
-    if len(replay_buffer) < INITIAL_BUFFER_SIZE:
+    if len(replay_buffer.buffer) < INITIAL_BUFFER_SIZE:  # Use .buffer if using PER
         return
-    states, actions, rewards, next_states, dones = replay_buffer.sample(BATCH_SIZE)
 
-    if USE_8BIT:
-        states = torch.tensor(states, dtype=torch.float32).to(device) / 255.0
-        next_states = torch.tensor(next_states, dtype=torch.float32).to(device) / 255.0
+    if USE_PRIORITY_BUFFER:
+        # Sample with priorities
+        states, actions, rewards, next_states, dones, indices, weights = replay_buffer.sample(BATCH_SIZE, beta)
+        states = np.array(states)
+        next_states = np.array(next_states)
+        actions = np.array(actions)
+        rewards = np.array(rewards)
+
+        if USE_8BIT:
+            states = torch.tensor(states, dtype=torch.float32).to(device) / 255.0
+            next_states = torch.tensor(next_states, dtype=torch.float32).to(device) / 255.0
+        else:
+            states = torch.tensor(np.array(states), dtype=torch.float32).to(device)
+            next_states = torch.tensor(next_states, dtype=torch.float32).to(device)
+        actions = torch.tensor(actions, dtype=torch.long).unsqueeze(1).to(device)
+        rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to(device)
+        dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to(device)
+        weights_tensor = torch.tensor(weights, dtype=torch.float32).unsqueeze(1).to(device)
     else:
-        states = torch.tensor(states, dtype=torch.float32).to(device)
-        next_states = torch.tensor(next_states, dtype=torch.float32).to(device)
+        states, actions, rewards, next_states, dones = replay_buffer.sample(BATCH_SIZE)  # Uniform sampling
+        states = np.array(states)
+        next_states = np.array(next_states)
+        actions = np.array(actions)
+        rewards = np.array(rewards)
 
-    actions = torch.tensor(actions, dtype=torch.long).unsqueeze(1).to(device)
-    rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to(device)
-    dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to(device)
+        if USE_8BIT:
+            states = torch.tensor(states, dtype=torch.float32).to(device) / 255.0
+            next_states = torch.tensor(next_states, dtype=torch.float32).to(device) / 255.0
+        else:
+            states = torch.tensor(states, dtype=torch.float32).to(device)
+            next_states = torch.tensor(next_states, dtype=torch.float32).to(device)
+        actions = torch.tensor(actions, dtype=torch.long).unsqueeze(1).to(device)
+        rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to(device)
+        dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to(device)
 
     q_values = policy_net(states).gather(1, actions)
     best_next_actions = policy_net(next_states).argmax(1, keepdim=True)
     next_q_values = target_net(next_states).gather(1, best_next_actions)
     target_q_values = rewards + GAMMA * next_q_values * (1 - dones)
 
-    loss = nn.MSELoss()(q_values, target_q_values)
+    # If using PER, weight the loss
+    if USE_PRIORITY_BUFFER:
+        loss_values = nn.MSELoss(reduction="none")(q_values, target_q_values)
+        loss = (loss_values * weights_tensor).mean()
+    else:
+        loss = nn.MSELoss()(q_values, target_q_values)
+
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
 
+    # If using PER, update priorities using TD error (add a small constant for stability)
+    if USE_PRIORITY_BUFFER:
+        td_errors = torch.abs(q_values - target_q_values).detach().cpu().numpy().flatten() + 1e-6
+        replay_buffer.update_priorities(indices, td_errors)
+
     global_train_step += 1
     if global_train_step % 100 == 0:
         avg_q = q_values.mean().item()
-        loss_value = f"{loss.item():.4f}"
-        avg_q_value = f"{avg_q:.4f}"
-        writer.writerow([episode, global_train_step, total_frames, loss_value, avg_q_value, epsilon, episode_reward])
+        writer.writerow(
+            [episode, global_train_step, total_frames, f"{loss.item():.4f}", f"{avg_q:.4f}", epsilon, episode_reward]
+        )
         csvfile.flush()
 
 
-def get_action_from_direction(candidate, current_direction):
-    if current_direction.length() == 0:
-        forward = pygame.math.Vector2(0, -1)
-    else:
-        forward = current_direction.normalize()
-    left = pygame.math.Vector2(-forward.y, forward.x)
-    right = pygame.math.Vector2(forward.y, -forward.x)
-    reverse = -forward
-    if candidate.length() == 0:
-        cand = pygame.math.Vector2(0, -1)
-    else:
-        cand = candidate.normalize()
-    dots = [cand.dot(forward), cand.dot(left), cand.dot(right), cand.dot(reverse)]
-    action = dots.index(max(dots))
-    return action
-
-
-# -----------------------------
-# Training Loop
-# -----------------------------
+# In your main training loop, you need to compute beta for PER:
 def train_dqn():
-    global epsilon, best_avg_reward
+    global epsilon, best_single_reward, best_avg_reward
     env = PacmanEnv(fixed_maze=FIXED_MAZE)
     total_frames = 0
     best_episode_reward = float("-inf")
-    best_single_reward = float("-inf")  # Track the best single-episode reward
     episode_rewards = []
-
     for episode in range(NUM_EPISODES):
         state = env.reset()
         done = False
         episode_reward = 0
-        episodes_since_improvement = 0
-        patience = 250
         steps = 0
-
-        # 4 steps
-        # while not done and steps < MAX_STEPS_PER_EPISODE:
-        #     action = select_action(state, epsilon)
-        #     total_reward = 0
-        #     for _ in range(4):
-        #         next_state, reward, done, _ = env.step(action)
-        #         total_reward += reward
-        #         if done:
-        #             break
-        #     replay_buffer.push(state, action, total_reward, next_state, done)
-        #     state = next_state
-        #     episode_reward += total_reward
-        #     steps += 1
-        #     train_step_double_dqn(episode, total_frames, episode_reward)
-        #     total_frames += 1
-        #     if total_frames % TARGET_UPDATE_FREQ == 0:
-        #         target_net.load_state_dict(policy_net.state_dict())
-
-        # Single Step
         last_action = None
+
         while not done and steps < MAX_STEPS_PER_EPISODE:
-            action = select_action_with_inertia(
-                state,
-                epsilon,
-                last_action=last_action if steps > 0 else None,
-                inertia=1,
-            )
+            action = select_action_with_inertia(state, epsilon, last_action, inertia=1)
             last_action = action
-            # action = select_action(state, epsilon)
-            # print(f"action={action}".strip())
-            # input()
             next_state, reward, done, _ = env.step(action)
             replay_buffer.push(state, action, reward, next_state, done)
             state = next_state
             episode_reward += reward
             steps += 1
-            train_step_double_dqn(episode, total_frames, episode_reward)
+
+            # Compute PER beta linearly annealed from PER_BETA_START to 1.0 over PER_BETA_FRAMES.
+            if USE_PRIORITY_BUFFER:
+                beta = min(1.0, PER_BETA_START + total_frames * (1.0 - PER_BETA_START) / PER_BETA_FRAMES)
+            else:
+                beta = 1.0
+
+            train_step_double_dqn(episode, total_frames, episode_reward, beta)
             total_frames += 1
             if total_frames % TARGET_UPDATE_FREQ == 0:
                 target_net.load_state_dict(policy_net.state_dict())
 
-        if best_episode_reward < episode_reward:
+        if episode_reward > best_episode_reward:
             best_episode_reward = episode_reward
 
-        # Save best single-episode model if this episode beats previous best
         if episode_reward > best_single_reward:
             best_single_reward = episode_reward
             best_single_checkpoint = {
@@ -242,84 +264,89 @@ def train_dqn():
 
         episode_rewards.append(episode_reward)
         print(
-            f"Episode {episode} => Reward: {episode_reward:.2f}, Highest Reward: {best_episode_reward:.2f} Steps: {steps}, Total Frames: {total_frames}, Replay_Buffer: {len(replay_buffer)}, Epsilon: {epsilon:.3f}"
+            f"Episode {episode} => Reward: {episode_reward:.2f}, Highest Reward: {best_episode_reward:.2f}, "
+            f"Steps: {steps}, Total Frames: {total_frames}, Replay_Buffer: {len(replay_buffer.buffer) if USE_PRIORITY_BUFFER else len(replay_buffer)}, Epsilon: {epsilon:.3f}"
         )
 
-        if replay_buffer and len(replay_buffer) >= INITIAL_BUFFER_SIZE:
+        if (
+            replay_buffer
+            and (len(replay_buffer.buffer) if USE_PRIORITY_BUFFER else len(replay_buffer)) >= INITIAL_BUFFER_SIZE
+        ):
             epsilon = max(EPSILON_END, epsilon * EPSILON_DECAY)
 
-        if episode > 0 and episode % 10 == 0:
-            avg_reward = sum(episode_rewards[-10:]) / 10.0
-            print(f"Average reward over last 10 episodes: {avg_reward:.2f} - best so far: {best_avg_reward:.2f}")
+        if episode > 0 and episode % 25 == 0:
+            window_size = 25
+            avg_reward = sum(episode_rewards[-window_size:]) / window_size
+            print(f"Average reward over last {window_size} episodes: {avg_reward:.2f}")
+            with open("average_rewards.csv", "a", newline="") as f:
+                writer_csv = csv.writer(f)
+                writer_csv.writerow([episode, avg_reward])
             latest_checkpoint = {"model_state": policy_net.state_dict(), "epsilon": epsilon}
             torch.save(latest_checkpoint, LATEST_CHECKPOINT_PATH)
-            print(f"📌 Latest checkpoint saved at episode {episode}")
             if avg_reward > best_avg_reward:
                 best_avg_reward = avg_reward
-                episodes_since_improvement = 0
-                best_checkpoint = {
+                best_avg_checkpoint = {
                     "model_state": policy_net.state_dict(),
                     "epsilon": epsilon,
                     "best_avg_reward": best_avg_reward,
                 }
-                torch.save(best_checkpoint, BEST_CHECKPOINT_PATH)
+                torch.save(best_avg_checkpoint, BEST_AVG_CHECKPOINT_PATH)
                 print(f"🏆 New best average model saved at episode {episode} with average reward {avg_reward:.2f}")
-            else:
-                episodes_since_improvement += 10
 
-            if episodes_since_improvement >= patience:
-                print("Early stopping: No significant improvement in average reward.")
-                break
+        decay_noisy_params(policy_net, NOISY_DECAY)
 
     env.close()
 
 
-# -----------------------------
-# Evaluation / Play Mode
-# -----------------------------
-def play_dqn(num_episodes=10):
-    # Decide which checkpoint to load based on PLAY_CHECKPOINT setting.
-    if PLAY_CHECKPOINT == "best_single":
-        checkpoint_path = BEST_SINGLE_CHECKPOINT_PATH
-    elif PLAY_CHECKPOINT == "best_avg":
-        checkpoint_path = BEST_CHECKPOINT_PATH
-    else:
-        checkpoint_path = LATEST_CHECKPOINT_PATH
+def evaluate_dqn(policy_net, env, num_episodes=5, max_steps=150):
+    """
+    Runs num_episodes with epsilon=0 (pure exploitation),
+    prints the reward (and steps) for each episode, and then
+    prints the average reward over those episodes.
 
-    if os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        policy_net.load_state_dict(checkpoint["model_state"])
-        policy_net.eval()
-        print(f"🏆 Loaded trained model from {checkpoint_path} for play mode.")
-    else:
-        print("🚨 No checkpoint found. Exiting play mode.")
-        return
+    - policy_net.eval() temporarily disables noise for NoisyNets.
+    - You can also pass a custom max_steps if your environment allows it.
+    """
+    policy_net.eval()  # Disables noise sampling in NoisyLinear layers if you're using NoisyNets
 
-    play_epsilon = 0.0
-    env = PacmanEnv(fixed_maze=True)
-    for episode in range(num_episodes):
+    total_rewards = []
+    for ep in range(num_episodes):
         state = env.reset()
         done = False
-        steps = 0
         episode_reward = 0
-        while not done and steps < MAX_STEPS_PER_EPISODE:
-            action = select_action(state, play_epsilon)
+        steps = 0
+
+        while not done and steps < max_steps:
+            # Pure greedy action (epsilon=0)
+            with torch.no_grad():
+                state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
+                if USE_8BIT:
+                    state_tensor = state_tensor / 255.0
+                q_values = policy_net(state_tensor)
+                action = q_values.argmax().item()
+
             state, reward, done, _ = env.step(action)
             episode_reward += reward
-            env.render()
             steps += 1
-        print(f"Evaluation Episode {episode} finished in {steps} steps with reward {episode_reward:.2f}.")
-    env.close()
+
+        total_rewards.append(episode_reward)
+        print(f"[EVAL] Episode {ep} => Reward: {episode_reward:.2f}, Steps: {steps}")
+
+    avg_reward = sum(total_rewards) / len(total_rewards)
+    print(f"[EVAL] Over {num_episodes} episodes, average reward = {avg_reward:.2f}")
+
+    # Switch back to training mode so we can keep training
+    policy_net.train()
+    return avg_reward
 
 
-# -----------------------------
-# Main Entry Point
-# -----------------------------
 if __name__ == "__main__":
     pygame.init()
     if MODE == "train":
         train_dqn()
     elif MODE == "play":
-        play_dqn(num_episodes=5)
+        eval_env = PacmanEnv(fixed_maze=True)
+        evaluate_dqn(policy_net, eval_env, num_episodes=5, max_steps=MAX_STEPS_PER_EPISODE)
+        eval_env.close()
     pygame.time.delay(3000)
     pygame.quit()

@@ -9,7 +9,6 @@ import cv2  # OpenCV for image processing
 import numpy as np
 import pygame
 
-from ghost import Ghost  # Future use.
 from maze import Maze, generate_maze, get_open_cells, safe_spawn_pacman
 from pacman import PacMan
 from train.settings import (  # noqa
@@ -25,10 +24,13 @@ from train.settings import (  # noqa
     HEADLESS,
     MODE,
     MOVE_TOWARD_PELLOT,
+    NOVELTY_BONUS,
     PELLET_SCORE,
     ROWS,
+    STEP_PENALTY,
     TILE_SIZE,
     USE_8BIT,
+    USE_ABSOLUTE_ACTIONS,
     WALL_COLLISION_PENALTY,
 )
 
@@ -74,14 +76,14 @@ class PacmanEnv:
             raise Exception("No open cells in maze!")
 
         ghosts = []
-        ghost_cells = open_cells[:]  # copy list
-        random.shuffle(ghost_cells)
-        for _ in range(3):
-            if ghost_cells:
-                cell = ghost_cells.pop()
-                ghost_x = cell[1] * TILE_SIZE + TILE_SIZE // 2
-                ghost_y = cell[0] * TILE_SIZE + TILE_SIZE // 2
-                ghosts.append(Ghost(ghost_x, ghost_y))
+        # ghost_cells = open_cells[:]  # copy list
+        # random.shuffle(ghost_cells)
+        # for _ in range(3):
+        #     if ghost_cells:
+        #         cell = ghost_cells.pop()
+        #         ghost_x = cell[1] * TILE_SIZE + TILE_SIZE // 2
+        #         ghost_y = cell[0] * TILE_SIZE + TILE_SIZE // 2
+        #         ghosts.append(Ghost(ghost_x, ghost_y))
         self.ghosts = ghosts
 
         pac_cell = random.choice(open_cells)
@@ -98,7 +100,6 @@ class PacmanEnv:
         ]
         self.last_direction = random.choice(directions)
         self.old_tile = (int(pac_y // TILE_SIZE), int(pac_x // TILE_SIZE))
-        # return self.get_state()
 
         # Get the initial frame and fill the frame stack
         initial_frame = self._get_frame()
@@ -122,20 +123,31 @@ class PacmanEnv:
         return min_dist
 
     def _action_to_direction(self, action, base_direction):
-        # Convert an action (0: forward, 1: left, 2: right, 3: reverse)
-        # into a direction vector relative to the current base_direction.
-        if action == 0:
-            # print("forward")
-            return base_direction
-        elif action == 1:
-            # print("left")
-            return pygame.math.Vector2(-base_direction.y, base_direction.x)
-        elif action == 2:
-            # print("right")
-            return pygame.math.Vector2(base_direction.y, -base_direction.x)
-        elif action == 3:
-            # print("reverse")
-            return -base_direction
+        """
+        Convert an action index into a pygame Vector2 direction.
+        - If USE_ABSOLUTE_ACTIONS=True, we interpret 0=Up,1=Down,2=Left,3=Right.
+        - If USE_ABSOLUTE_ACTIONS=False, we interpret 0=forward,1=left,2=right,3=reverse relative to base_direction.
+        """
+        if USE_ABSOLUTE_ACTIONS:
+            # Absolute directions
+            if action == 0:
+                return pygame.math.Vector2(0, -1)  # Up
+            elif action == 1:
+                return pygame.math.Vector2(0, 1)  # Down
+            elif action == 2:
+                return pygame.math.Vector2(-1, 0)  # Left
+            elif action == 3:
+                return pygame.math.Vector2(1, 0)  # Right
+        else:
+            # Relative directions (forward, left, right, reverse)
+            if action == 0:
+                return base_direction
+            elif action == 1:
+                return pygame.math.Vector2(-base_direction.y, base_direction.x)
+            elif action == 2:
+                return pygame.math.Vector2(base_direction.y, -base_direction.x)
+            elif action == 3:
+                return -base_direction
 
     def legal_actions(self):
         legal = []
@@ -160,7 +172,7 @@ class PacmanEnv:
 
         # Wall collision penalty
         if self.pacman.collides_with_wall(new_x, new_y, self.maze_obj):
-            reward -= WALL_COLLISION_PENALTY  # Penalize for illegal action
+            reward -= WALL_COLLISION_PENALTY
 
         # Update last_direction and Pac-Man’s intended_direction with the final candidate.
         self.last_direction = candidate
@@ -210,6 +222,17 @@ class PacmanEnv:
 
         if dist_after < dist_before:
             reward += MOVE_TOWARD_PELLOT
+
+        # Novelty reward: bonus for visiting a new tile
+        tile = (int(self.pacman.y // TILE_SIZE), int(self.pacman.x // TILE_SIZE))
+        if not hasattr(self, "visited_tiles"):
+            self.visited_tiles = set()
+        if tile not in self.visited_tiles:
+            reward += NOVELTY_BONUS  # small bonus for novelty
+            self.visited_tiles.add(tile)
+
+        # # Step penalty: small negative reward for each step taken
+        reward -= STEP_PENALTY
 
         if HEADLESS:
             self.draw_offscreen()
