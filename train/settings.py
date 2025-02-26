@@ -9,6 +9,8 @@ USE_8BIT = True
 USE_NOISY = True  # Set to True to use NoisyLinear layers for exploration
 USE_ABSOLUTE_ACTIONS = True  # If True, 0=Up,1=Down,2=Left,3=Right; if False, 0=forward,1=left,2=right,3=reverse
 
+# For imitation learning, set to True to collect demonstration data.
+NUM_EPOCHS = 1000
 
 # =====================================================
 # Checkpoint & Logging Settings
@@ -20,6 +22,13 @@ LOAD_CHECKPOINT = "best_avg"
 BEST_AVG_CHECKPOINT_PATH = "pacman_dqn_best_avg.pth"  # Will store the best model by average reward
 BEST_SINGLE_CHECKPOINT_PATH = "pacman_dqn_best_single.pth"  # Already stores best single-episode score
 LATEST_CHECKPOINT_PATH = "pacman_dqn_latest.pth"  # Always stores the latest model
+
+MODE = "train"  # "train", "play", or "imitate"
+IMITATION_MODE = True  # Set to True when collecting demonstration data
+
+# Imitation learning settings:
+RECORD_DEMOS = True  # If True, record demonstration data during imitation mode.
+DEMO_DATA_PATH = "demonstrations.pkl"  # Where
 
 
 RENDER_EVERY = 10  # Render final frame every N episodes during training.
@@ -42,7 +51,7 @@ ACTION_DIM = 4  # 0 = up, 1 = down, 2 = left, 3 = right.
 LR = 0.00025  # Original value from Atari paper
 GAMMA = 0.99  # Discount factor for future rewards
 BATCH_SIZE = 32  # Number of transitions per training batch
-INITIAL_BUFFER_SIZE = 100  # Start training after this many steps.
+INITIAL_BUFFER_SIZE = 10000  # Start training after this many steps.
 BUFFER_CAPACITY = 100000  # Maximum size of the replay buffer (changed from 1,000,000)
 EPSILON_START = 0.05  # Initial epsilon for exploration
 EPSILON_LOAD_OVERWRITE = True  # If True, will overwrite epsilon from checkpoint.

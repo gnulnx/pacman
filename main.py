@@ -1,23 +1,31 @@
-import pygame
+import math
 import random
 import sys
-import math
-import torch
-import torch.nn as nn
+
 import cv2
 import numpy as np
+import pygame
+import torch
+import torch.nn as nn
 
 # --- Configuration for DQN auto-play ---
 AUTO_PLAY = True
-USE_DQN = True                              # Set to True to use the trained DQN for auto-play.
-MODEL_PATH = "pacman_dqn_best.pth"            # Path to the trained model checkpoint.
-INPUT_CHANNELS = 4                          # Number of input channels (frame stack size).
-ACTION_DIM = 4                              # 0 = up, 1 = down, 2 = left, 3 = right.
+USE_DQN = True  # Set to True to use the trained DQN for auto-play.
+MODEL_PATH = "pacman_dqn_best_avg.pth"  # Path to the trained model checkpoint.
+INPUT_CHANNELS = 4  # Number of input channels (frame stack size).
+ACTION_DIM = 4  # 0 = up, 1 = down, 2 = left, 3 = right.
 
-from pacman import PacMan
 from ghost import Ghost
 from maze import Maze, generate_maze, get_open_cells, safe_spawn_pacman
-from settings import TILE_SIZE, FPS, BLACK, NUM_GHOSTS, ROWS, COLS, WHITE, GHOST_SCORE
+from pacman import PacMan
+from settings import BLACK, COLS, FPS, GHOST_SCORE, NUM_GHOSTS, ROWS, TILE_SIZE, WHITE
+from train.dueling_dqn import DuelingDQN  # Use the same model as training
+
+
+class DQNWrapper(DuelingDQN):
+    def __init__(self, input_channels, output_dim):
+        super(DQNWrapper, self).__init__(input_channels, output_dim)
+
 
 # --- DQN Model Definition ---
 class DQN(nn.Module):
@@ -33,15 +41,18 @@ class DQN(nn.Module):
             nn.Flatten(),
             nn.Linear(7 * 7 * 64, 512),
             nn.ReLU(),
-            nn.Linear(512, output_dim)
+            nn.Linear(512, output_dim),
         )
+
     def forward(self, x):
         return self.net(x)
+
 
 # --- If using DQN, load the model ---
 if USE_DQN:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = DQN(INPUT_CHANNELS, ACTION_DIM).to(device)
+    # model = DQN(INPUT_CHANNELS, ACTION_DIM).to(device)
+    model = DQNWrapper(INPUT_CHANNELS, ACTION_DIM).to(device)  # For compatibility with DuelingDQN
     try:
         checkpoint = torch.load(MODEL_PATH, map_location=device)
         model.load_state_dict(checkpoint["model_state"])
@@ -50,6 +61,7 @@ if USE_DQN:
     except Exception as e:
         print(f"Error loading model from {MODEL_PATH}: {e}")
         USE_DQN = False  # Fall back to built-in auto-play if loading fails.
+
 
 # --- Helper Functions for DQN state capture and action selection ---
 def get_dqn_state(surface):
@@ -67,6 +79,7 @@ def get_dqn_state(surface):
     state = np.stack([normalized] * INPUT_CHANNELS, axis=0)
     return state
 
+
 def select_action_dqn(state):
     """
     Given a state (numpy array with shape (INPUT_CHANNELS,84,84)), select an action.
@@ -76,6 +89,7 @@ def select_action_dqn(state):
         q_values = model(state_tensor)
     action = q_values.argmax(dim=1).item()
     return action
+
 
 def action_to_direction(action):
     """
@@ -92,6 +106,7 @@ def action_to_direction(action):
         return pygame.math.Vector2(1, 0)
     else:
         return pygame.math.Vector2(0, 0)
+
 
 # --- Main Game Loop ---
 def run_game():
@@ -144,7 +159,7 @@ def run_game():
 
         pacman.update(maze_obj)
         for ghost in ghosts:
-            ghost.vulnerable = (pygame.time.get_ticks() < pacman.powerpellet_end)
+            ghost.vulnerable = pygame.time.get_ticks() < pacman.powerpellet_end
             ghost.update(maze_obj, pacman)
 
         # Collision check between Pac-Man and ghosts.
@@ -185,6 +200,7 @@ def run_game():
         screen.blit(lives_text, (10, 40))
         pygame.display.flip()
 
+
 def show_end_screen(message):
     screen = pygame.display.get_surface()
     font = pygame.font.SysFont(None, 48)
@@ -206,6 +222,7 @@ def show_end_screen(message):
                 elif event.key == pygame.K_n:
                     return False
 
+
 def main():
     pygame.init()
     play_again = True
@@ -217,5 +234,6 @@ def main():
     pygame.quit()
     sys.exit()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
