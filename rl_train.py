@@ -24,10 +24,12 @@ from train.settings import (
     EPSILON_START,
     FIXED_MAZE,
     GAMMA,
+    IMITATION_MODEL_PATH,
     INITIAL_BUFFER_SIZE,
     INPUT_CHANNELS,
     LATEST_CHECKPOINT_PATH,
     LOAD_CHECKPOINT,  # New flag to choose which checkpoint to load ("best_avg", "best_single", or "latest")
+    LOAD_FROM_IMITATION,
     LR,
     MAX_STEPS_PER_EPISODE,
     MODE,
@@ -76,7 +78,16 @@ best_single_reward = float("-inf")
 best_avg_reward = float("-inf")
 
 # --- Load checkpoint based on the LOAD_CHECKPOINT flag ---
-if LOAD_CHECKPOINT == "best_single" and os.path.exists(BEST_SINGLE_CHECKPOINT_PATH):
+# --- Load checkpoint based on imitation flag and LOAD_CHECKPOINT ---
+if LOAD_FROM_IMITATION and os.path.exists(IMITATION_MODEL_PATH):
+    checkpoint = torch.load(IMITATION_MODEL_PATH, map_location=device)
+    policy_net.load_state_dict(checkpoint["model_state"])
+    target_net.load_state_dict(policy_net.state_dict())
+    epsilon = checkpoint.get("epsilon", EPSILON_START)
+    if EPSILON_LOAD_OVERWRITE:
+        epsilon = EPSILON_START
+    print(f"🎓 Loaded imitation model from {IMITATION_MODEL_PATH} with epsilon {epsilon:.3f}.")
+elif LOAD_CHECKPOINT == "best_single" and os.path.exists(BEST_SINGLE_CHECKPOINT_PATH):
     checkpoint = torch.load(BEST_SINGLE_CHECKPOINT_PATH, map_location=device)
     policy_net.load_state_dict(checkpoint["model_state"])
     target_net.load_state_dict(policy_net.state_dict())

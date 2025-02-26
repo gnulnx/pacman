@@ -22,6 +22,13 @@ from train.settings import (
 IMT_EARLY_STOP_PATIENCE = 10  # number of epochs with no improvement before stopping
 IMT_MIN_DELTA = 0.001  # minimum improvement in loss to be considered as progress
 
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+else:
+    device = torch.device("cpu")
+
 
 # Helper function: convert a pygame vector (intended_direction) to a discrete action.
 def direction_to_action(direction):

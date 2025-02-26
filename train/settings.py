@@ -104,6 +104,12 @@ WALL_COLLISION_PENALTY = -0.1
 NOVELTY_BONUS = 1  # Bonus for exploring new areas of the maze
 STEP_PENALTY = 0.1
 
+# =====================================================
+# Imitation Learning Integration
+# =====================================================
+LOAD_FROM_IMITATION = True  # Whether to start from an imitation-learned model
+IMITATION_MODEL_PATH = "imitation_model.pth"  # Path to the imitation model
+# IMITATION_EPSILON_START = 0.3  # Start with lower epsilon when using imitation model
 
 # =====================================================
 # Entity Appearance Settings
