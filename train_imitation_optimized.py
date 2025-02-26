@@ -3,10 +3,14 @@ import pickle
 
 import cv2
 import numpy as np
+import pygame
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
+
+# Import your DuelingDQN architecture for imitation training.
+from train.dueling_dqn import DuelingDQN
 
 # Import settings
 from train.settings import (
@@ -18,22 +22,22 @@ from train.settings import (
     NUM_EPOCHS,
 )
 
-# If not in settings, you can define early stopping parameters here:
-IMT_EARLY_STOP_PATIENCE = 10  # number of epochs with no improvement before stopping
-IMT_MIN_DELTA = 0.001  # minimum improvement in loss to be considered as progress
+# Set a number of workers for DataLoader to speed up data loading.
+# Adjust NUM_WORKERS based on your system (e.g., 4 or 8).
+NUM_WORKERS = 0
+FRAME_STACK_SIZE = 4
 
+# Device selection (using MPS, then CUDA, then CPU)
 if torch.backends.mps.is_available():
     device = torch.device("mps")
 elif torch.cuda.is_available():
     device = torch.device("cuda")
 else:
     device = torch.device("cpu")
-
-print("device:", device)
-
-import pygame
+print("Using device:", device)
 
 
+# Helper function: convert a pygame vector (intended_direction) to a discrete action.
 def direction_to_action(direction):
     """
     Convert a pygame Vector2 intended_direction to a discrete action index
@@ -68,26 +72,6 @@ def direction_to_action(direction):
     return dot_products.index(max(dot_products))
 
 
-# Helper function: convert a pygame vector (intended_direction) to a discrete action.
-# def direction_to_action(direction):
-#     # We assume direction is a pygame.math.Vector2.
-#     threshold = 0.5
-#     x, y = direction.x, direction.y
-#     if abs(x) < threshold and y < -threshold:
-#         return 0  # up
-#     elif abs(x) < threshold and y > threshold:
-#         return 1  # down
-#     elif x < -threshold and abs(y) < threshold:
-#         return 2  # left
-#     elif x > threshold and abs(y) < threshold:
-#         return 3  # right
-#     else:
-#         if abs(x) >= abs(y):
-#             return 2 if x < 0 else 3
-#         else:
-#             return 0 if y < 0 else 1
-
-
 # Dataset for imitation learning.
 class ImitationDataset(Dataset):
     def __init__(self, demo_file):
@@ -110,22 +94,27 @@ class ImitationDataset(Dataset):
 
     def __getitem__(self, idx):
         state, action = self.data[idx]
-        # Process state: convert from (width, height, 3) to (INPUT_CHANNELS, 84, 84)
-        state = np.transpose(state, (1, 0, 2))  # now (height, width, 3)
-        gray = cv2.cvtColor(state, cv2.COLOR_RGB2GRAY)
-        resized = cv2.resize(gray, (84, 84))
-        normalized = resized.astype(np.float32) / 255.0
-        if INPUT_CHANNELS > 1:
-            state_processed = np.stack([normalized] * INPUT_CHANNELS, axis=0)
+
+        # Check the shape of the state.
+        # If it's already a stacked state, its shape will be (FRAME_STACK_SIZE, 84, 84)
+        if state.ndim == 3 and state.shape[0] == FRAME_STACK_SIZE:
+            # Assume state is already preprocessed.
+            state_processed = state
         else:
-            state_processed = np.expand_dims(normalized, axis=0)
+            # Otherwise, assume the state is a raw RGB image with shape (width, height, 3)
+            # and process it as before.
+            state = np.transpose(state, (1, 0, 2))  # now (height, width, 3)
+            gray = cv2.cvtColor(state, cv2.COLOR_RGB2GRAY)
+            resized = cv2.resize(gray, (84, 84))
+            normalized = resized.astype(np.float32) / 255.0
+            if INPUT_CHANNELS > 1:
+                state_processed = np.stack([normalized] * INPUT_CHANNELS, axis=0)
+            else:
+                state_processed = np.expand_dims(normalized, axis=0)
+
         state_tensor = torch.tensor(state_processed, dtype=torch.float32)
         action_tensor = torch.tensor(action, dtype=torch.long)
         return state_tensor, action_tensor
-
-
-# Use your DuelingDQN architecture for imitation training.
-from train.dueling_dqn import DuelingDQN
 
 
 def train_imitation():
@@ -134,38 +123,56 @@ def train_imitation():
         print("No demonstration data found. Exiting.")
         return
 
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Use the improved NUM_WORKERS in DataLoader for faster data loading.
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
+
+    # Ensure model is sent to the selected device.
     model = DuelingDQN(INPUT_CHANNELS, ACTION_DIM).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=LR)
 
+    # Set up GradScaler for mixed precision training (only effective on CUDA)
+    scaler = torch.amp.GradScaler() if device.type == "cuda" else None
+
     print("Starting imitation training...")
+
     best_loss = float("inf")
     patience_counter = 0
 
     for epoch in range(NUM_EPOCHS):
         epoch_loss = 0.0
         for states, actions in dataloader:
-            states = states.to(device)  # shape: (BATCH_SIZE, INPUT_CHANNELS, 84,84)
-            actions = actions.to(device)  # shape: (BATCH_SIZE,)
-            logits = model(states)  # shape: (BATCH_SIZE, ACTION_DIM)
-            loss = criterion(logits, actions)
+            # Transfer data to device
+            states = states.to(device)
+            actions = actions.to(device)
+
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            # Use autocast for mixed precision (if using CUDA)
+            with torch.amp.autocast(enabled=(scaler is not None), device_type="mps"):
+                logits = model(states)
+                loss = criterion(logits, actions)
+
+            # Backward pass using GradScaler if available
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
+
             epoch_loss += loss.item() * states.size(0)
         epoch_loss /= len(dataset)
         print(f"Epoch {epoch+1}/{NUM_EPOCHS}, Loss: {epoch_loss:.4f}")
 
         # Early stopping: if loss hasn't improved by IMT_MIN_DELTA for IMT_EARLY_STOP_PATIENCE epochs, stop.
-        if best_loss - epoch_loss > IMT_MIN_DELTA:
+        if best_loss - epoch_loss > 0.001:  # IMT_MIN_DELTA
             best_loss = epoch_loss
             patience_counter = 0
         else:
             patience_counter += 1
             print(f"No significant improvement for {patience_counter} epoch(s).")
-            if patience_counter >= IMT_EARLY_STOP_PATIENCE:
+            if patience_counter >= 10:  # IMT_EARLY_STOP_PATIENCE
                 print("Early stopping triggered.")
                 break
 
@@ -176,5 +183,5 @@ def train_imitation():
 if __name__ == "__main__":
     print("MODE:", "imitate")
     print("IMITATION_MODE:", True)
-    input("Press Enter to start imitation training...")
+    # Removed blocking input() call to avoid unnecessary waiting.
     train_imitation()

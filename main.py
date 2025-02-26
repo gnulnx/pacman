@@ -6,12 +6,11 @@ import cv2
 import numpy as np
 import pygame
 import torch
-import torch.nn as nn
 
 # --- Configuration for DQN auto-play ---
 AUTO_PLAY = True
 USE_DQN = True  # Set to True to use the trained DQN for auto-play.
-MODEL_PATH = "pacman_dqn_best_avg.pth"  # Path to the trained model checkpoint.
+MODEL_PATH = "imitation_model_25.pth"  # Path to the trained model checkpoint.
 INPUT_CHANNELS = 4  # Number of input channels (frame stack size).
 ACTION_DIM = 4  # 0 = up, 1 = down, 2 = left, 3 = right.
 
@@ -27,30 +26,14 @@ class DQNWrapper(DuelingDQN):
         super(DQNWrapper, self).__init__(input_channels, output_dim)
 
 
-# --- DQN Model Definition ---
-class DQN(nn.Module):
-    def __init__(self, input_channels, output_dim):
-        super(DQN, self).__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(input_channels, 32, kernel_size=8, stride=4),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(7 * 7 * 64, 512),
-            nn.ReLU(),
-            nn.Linear(512, output_dim),
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-
 # --- If using DQN, load the model ---
 if USE_DQN:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
     # model = DQN(INPUT_CHANNELS, ACTION_DIM).to(device)
     model = DQNWrapper(INPUT_CHANNELS, ACTION_DIM).to(device)  # For compatibility with DuelingDQN
     try:
@@ -96,15 +79,22 @@ def action_to_direction(action):
     Map DQN action index to a pygame.Vector2 direction.
     0: up, 1: down, 2: left, 3: right.
     """
+    print("action", action)
     if action == 0:
+        # input("up")
         return pygame.math.Vector2(0, -1)
     elif action == 1:
+        # input("down")
         return pygame.math.Vector2(0, 1)
     elif action == 2:
+        # input("left")
         return pygame.math.Vector2(-1, 0)
     elif action == 3:
+        # input("right")
         return pygame.math.Vector2(1, 0)
     else:
+        print("HERE")
+        input()
         return pygame.math.Vector2(0, 0)
 
 

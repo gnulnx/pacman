@@ -51,7 +51,7 @@ ACTION_DIM = 4  # 0 = up, 1 = down, 2 = left, 3 = right.
 LR = 0.00025  # Original value from Atari paper
 GAMMA = 0.99  # Discount factor for future rewards
 BATCH_SIZE = 32  # Number of transitions per training batch
-INITIAL_BUFFER_SIZE = 10000  # Start training after this many steps.
+INITIAL_BUFFER_SIZE = 100  # Start training after this many steps.
 BUFFER_CAPACITY = 100000  # Maximum size of the replay buffer (changed from 1,000,000)
 EPSILON_START = 0.05  # Initial epsilon for exploration
 EPSILON_LOAD_OVERWRITE = True  # If True, will overwrite epsilon from checkpoint.

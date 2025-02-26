@@ -1,4 +1,5 @@
 import math
+import random
 from collections import deque
 
 import pygame
@@ -141,19 +142,59 @@ class PacMan:
         else:
             pygame.draw.circle(surface, PACMAN_YELLOW, (int(self.x), int(self.y)), self.radius)
 
+    # def auto_navigate(self, maze):
+    #     # Original BFS-based auto-navigation (used only when not using DQN control).
+    #     row = int(self.y // TILE_SIZE)
+    #     col = int(self.x // TILE_SIZE)
+    #     center_x = col * TILE_SIZE + TILE_SIZE / 2
+    #     center_y = row * TILE_SIZE + TILE_SIZE / 2
+    #     if abs(self.x - center_x) < 1 and abs(self.y - center_y) < 1:
+    #         path = find_path_to_nearest_item(maze, row, col)
+    #         if path and len(path) > 1:
+    #             next_tile = path[1]
+    #             dr = next_tile[0] - row
+    #             dc = next_tile[1] - col
+    #             self.intended_direction = pygame.math.Vector2(dc, dr)
+
     def auto_navigate(self, maze):
-        # Original BFS-based auto-navigation (used only when not using DQN control).
+        """
+        Use BFS to determine the next move.
+        This version computes a BFS path from the current grid cell to the nearest target.
+        If a path exists, it immediately sets the intended direction toward the next cell.
+        If no path exists, it chooses a random legal direction.
+        """
         row = int(self.y // TILE_SIZE)
         col = int(self.x // TILE_SIZE)
-        center_x = col * TILE_SIZE + TILE_SIZE / 2
-        center_y = row * TILE_SIZE + TILE_SIZE / 2
-        if abs(self.x - center_x) < 1 and abs(self.y - center_y) < 1:
-            path = find_path_to_nearest_item(maze, row, col)
-            if path and len(path) > 1:
-                next_tile = path[1]
-                dr = next_tile[0] - row
-                dc = next_tile[1] - col
-                self.intended_direction = pygame.math.Vector2(dc, dr)
+        path = find_path_to_nearest_item(maze, row, col)
+        if path and len(path) > 1:
+            next_tile = path[1]
+            # Compute the direction based on grid differences.
+            dr = next_tile[0] - row
+            dc = next_tile[1] - col
+            desired_direction = pygame.math.Vector2(dc, dr)
+            if desired_direction.length() > 0:
+                self.intended_direction = desired_direction.normalize()
+            else:
+                # Fallback in case desired_direction is zero.
+                self.intended_direction = pygame.math.Vector2(0, 0)
+        else:
+            # If BFS doesn't yield a path, choose a random legal direction.
+            legal = []
+            candidate_dirs = [
+                pygame.math.Vector2(0, -1),  # Up
+                pygame.math.Vector2(0, 1),  # Down
+                pygame.math.Vector2(-1, 0),  # Left
+                pygame.math.Vector2(1, 0),  # Right
+            ]
+            for vec in candidate_dirs:
+                new_x = self.x + vec.x * self.speed
+                new_y = self.y + vec.y * self.speed
+                if not self.collides_with_wall(new_x, new_y, maze):
+                    legal.append(vec)
+            if legal:
+                self.intended_direction = random.choice(legal)
+            else:
+                self.intended_direction = pygame.math.Vector2(0, 0)
 
 
 def find_path_to_nearest_item(maze, start_r, start_c):
