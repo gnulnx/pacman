@@ -1,3 +1,4 @@
+import random
 import time
 
 import torch
@@ -57,7 +58,7 @@ from pacman_env import ACTIONS, Config, MazeSpec, PacmanEnv, generate_rect_layou
 #     env.close()
 
 
-def evaluate(model_path, maze_spec, episodes=5, delay=0.25):
+def evaluate(model_path, maze_spec, episodes=5, delay=0.25, randmon_pacman_start=False):
     # 1) Freeze the layout explicitly from the spec
     layout = tuple(generate_rect_layout(maze_spec))
 
@@ -89,6 +90,18 @@ def evaluate(model_path, maze_spec, episodes=5, delay=0.25):
 
     print(f"🎯 Evaluating {model_path} on {maze_spec.width}x{maze_spec.height} maze...")
     for ep in range(episodes):
+        if randmon_pacman_start:
+            start_x = random.randint(0, spec.width - 1)
+            start_y = random.randint(0, spec.height - 1)
+            spec.pacman_start = (start_x, start_y)
+
+            # Reinit layout and env with new pacman start
+            layout = tuple(generate_rect_layout(maze_spec))
+            cfg = Config(maze_layout=layout)  # <- NOT maze_spec
+            env = PacmanEnv(cfg, human_mode=False, headless=False)
+
+            env.reset()
+
         state = preprocess_state(env.reset())
         done = False
         total_reward = 0.0
@@ -108,16 +121,29 @@ def evaluate(model_path, maze_spec, episodes=5, delay=0.25):
 
 if __name__ == "__main__":
     # ✅ use your trained stage2 model
-    size = 2
+    size = 4
+
+    # spec = MazeSpec(
+    #     width=4,
+    #     height=4,
+    #     include_ghosts=False,
+    #     pellet_mode="full",
+    #     pacman_start=(2, 1),
+    #     pellet_positions=[(0, 0)],
+    #     include_power_pellets=False,
+    #     surround_walls=True,
+    # )
+
+    start_x = random.randint(0, size - 1)
+    start_y = random.randint(0, size - 1)
 
     spec = MazeSpec(
-        width=2,
-        height=2,
+        width=size,
+        height=size,
+        pacman_start=(start_x, start_y),
         include_ghosts=False,
-        pellet_mode="single",
-        pacman_start=(1, 1),
-        pellet_positions=[(1, 0)],
-        include_power_pellets=False,
+        pellet_mode="full",
+        # pellet_positions=[(0, 0)],
         surround_walls=True,
     )
-    evaluate("runs/stage8/final_model.pt", spec)
+    evaluate("runs/stage38/final_model.pt", spec, randmon_pacman_start=True)

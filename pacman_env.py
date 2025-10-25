@@ -263,6 +263,8 @@ class Maze:
         self.pacman_spawn = pacman_spawn
         self.ghost_spawns = ghost_spawns
         self._validate_layout()
+        # Preserve the post-validation pellet mask so reset() restores the exact layout
+        self._initial_pellets = self.pellets.copy()
 
     def in_bounds(self, pos: GridPos) -> bool:
         """Check whether the position lies inside the maze."""
@@ -282,7 +284,7 @@ class Maze:
 
     def reset(self) -> None:
         """Restore the pellet field to its initial state."""
-        self.pellets[:, :] = [[1 if ch in ".PGo" else 0 for ch in row] for row in self._layout]
+        np.copyto(self.pellets, self._initial_pellets)
 
     def _validate_layout(self) -> None:
         """Ensure every pellet is reachable; repair layout when needed."""
