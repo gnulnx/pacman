@@ -233,18 +233,26 @@ class Pacman:
         """Create Pac-Man at the supplied starting tile."""
         self.position: GridPos = start
         self.direction: Direction = (0, 0)
+        self.desired_direction: Direction = (0, 0)
 
     def set_direction(self, direction: Direction, maze: Maze) -> None:
-        """Update desired direction if the next tile is traversable."""
-        next_pos = (self.position[0] + direction[0], self.position[1] + direction[1])
-        if maze.in_bounds(next_pos) and not maze.is_wall(next_pos):
-            self.direction = direction
+        """Remember desired direction and apply it when possible."""
+        self.desired_direction = direction
+        self._apply_desired_direction(maze)
 
     def step(self, maze: Maze) -> None:
         """Advance one tile in the current direction when possible."""
+        self._apply_desired_direction(maze)
         next_pos = (self.position[0] + self.direction[0], self.position[1] + self.direction[1])
         if maze.in_bounds(next_pos) and not maze.is_wall(next_pos):
             self.position = next_pos
+        elif self.desired_direction != self.direction:
+            self._apply_desired_direction(maze)
+
+    def _apply_desired_direction(self, maze: Maze) -> None:
+        next_pos = (self.position[0] + self.desired_direction[0], self.position[1] + self.desired_direction[1])
+        if maze.in_bounds(next_pos) and not maze.is_wall(next_pos):
+            self.direction = self.desired_direction
 
 
 class Ghost:
