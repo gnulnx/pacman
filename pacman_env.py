@@ -1,4 +1,5 @@
 """Minimal modular Pac-Man environment built on pygame for RL experimentation."""
+
 from __future__ import annotations
 
 import random
@@ -12,6 +13,115 @@ import pygame
 GridPos = Direction = Tuple[int, int]
 
 ACTIONS: Dict[int, Direction] = {0: (0, -1), 1: (0, 1), 2: (-1, 0), 3: (1, 0)}
+
+
+@dataclass
+class MazeSpec:
+    """Small helper describing simple rectangular mazes for RL curricula."""
+
+    width: int
+    height: int
+    surround_walls: bool = True
+    include_pellets: bool = True
+    pellet_mode: str = "full"  # full, single, stripe_h, stripe_v, l_shape, custom
+    pellet_positions: Optional[List[GridPos]] = None
+    pellet_density: float = 1.0
+    include_power_pellets: bool = False
+    power_pellet_positions: Optional[List[GridPos]] = None
+    include_ghosts: bool = True
+    ghost_positions: Optional[List[GridPos]] = None
+    pacman_start: GridPos = (0, 0)  # interior coordinates (0,0) top-left
+    random_seed: Optional[int] = None
+
+
+def generate_rect_layout(spec: MazeSpec) -> List[str]:
+    """Create a simple rectangular maze from the provided specification."""
+    rng = random.Random(spec.random_seed)
+    width, height = spec.width, spec.height
+    grid_width = width + 2 if spec.surround_walls else width
+    grid_height = height + 2 if spec.surround_walls else height
+
+    def to_grid(pos: GridPos) -> GridPos:
+        x, y = pos
+        if spec.surround_walls:
+            return (x + 1, y + 1)
+        return pos
+
+    rows = (
+        [["#"] * grid_width for _ in range(grid_height)]
+        if spec.surround_walls
+        else [[" "] * grid_width for _ in range(grid_height)]
+    )
+    for y in range(height):
+        for x in range(width):
+            gx, gy = to_grid((x, y))
+            rows[gy][gx] = " "
+
+    pellets: List[GridPos] = []
+    if spec.include_pellets:
+        interior_coords = [(x, y) for y in range(height) for x in range(width)]
+        start = spec.pacman_start
+        interior_coords = [pos for pos in interior_coords if pos != start]
+        if spec.pellet_mode == "full":
+            for pos in interior_coords:
+                if spec.pellet_density >= 1.0 or rng.random() <= spec.pellet_density:
+                    pellets.append(pos)
+        elif spec.pellet_mode == "single":
+            if spec.pellet_positions:
+                pellets.extend(spec.pellet_positions)
+            else:
+                pellets.append((width - 1, height - 1))
+        elif spec.pellet_mode == "stripe_h":
+            for y in range(height):
+                if y % 2 == 0:
+                    for x in range(width):
+                        pellets.append((x, y))
+        elif spec.pellet_mode == "stripe_v":
+            for x in range(width):
+                if x % 2 == 0:
+                    for y in range(height):
+                        pellets.append((x, y))
+        elif spec.pellet_mode == "l_shape":
+            for x in range(width):
+                pellets.append((x, 0))
+            for y in range(height):
+                pellets.append((0, y))
+        elif spec.pellet_mode == "custom" and spec.pellet_positions:
+            pellets.extend(spec.pellet_positions)
+    pellets = [pos for pos in pellets if 0 <= pos[0] < width and 0 <= pos[1] < height]
+
+    power_positions: List[GridPos] = []
+    if spec.include_power_pellets:
+        if spec.power_pellet_positions:
+            power_positions = spec.power_pellet_positions
+        else:
+            power_positions = [(0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)]
+    power_positions = [pos for pos in power_positions if 0 <= pos[0] < width and 0 <= pos[1] < height]
+
+    pacman_grid = to_grid(spec.pacman_start)
+    rows[pacman_grid[1]][pacman_grid[0]] = "P"
+
+    unique_pellets = set(pellets)
+    for pos in unique_pellets:
+        gx, gy = to_grid(pos)
+        rows[gy][gx] = "."
+    for pos in power_positions:
+        gx, gy = to_grid(pos)
+        rows[gy][gx] = "o"
+
+    ghost_positions = spec.ghost_positions or []
+    if spec.include_ghosts and not ghost_positions:
+        default = (width - 1, height - 1)
+        if default != spec.pacman_start:
+            ghost_positions = [default]
+        else:
+            ghost_positions = [(width // 2, height // 2)]
+    for pos in ghost_positions:
+        if 0 <= pos[0] < width and 0 <= pos[1] < height:
+            gx, gy = to_grid(pos)
+            rows[gy][gx] = "G"
+
+    return ["".join(row) for row in rows]
 
 
 def generate_connected_layout(size: int, seed: Optional[int] = None) -> List[str]:
@@ -91,6 +201,7 @@ class Config:
     tile_size: int = 24
     maze_size: int = 17
     maze_layout: Optional[Sequence[str]] = None
+    maze_spec: Optional[MazeSpec] = None
     fps: int = 10
     background_color: Tuple[int, int, int] = (0, 0, 0)
     wall_color: Tuple[int, int, int] = (0, 51, 153)
@@ -100,8 +211,12 @@ class Config:
     random_seed: Optional[int] = None
 
     def __post_init__(self) -> None:
+
         if self.maze_layout is None:
-            self.maze_layout = tuple(generate_connected_layout(self.maze_size, self.random_seed))
+            if self.maze_spec is not None:
+                self.maze_layout = tuple(generate_rect_layout(self.maze_spec))
+            else:
+                self.maze_layout = tuple(generate_connected_layout(self.maze_size, self.random_seed))
 
     @property
     def width(self) -> int:
@@ -124,7 +239,9 @@ class Maze:
         self._layout = [list(row) for row in layout]
         self.width, self.height = len(self._layout[0]), len(self._layout)
         self.walls = {(x, y) for y, row in enumerate(self._layout) for x, ch in enumerate(row) if ch == "#"}
-        self.pellets: np.ndarray = np.array([[1 if ch in ".PG" else 0 for ch in row] for row in self._layout], dtype=np.uint8)
+        self.pellets: np.ndarray = np.array(
+            [[1 if ch in ".PGo" else 0 for ch in row] for row in self._layout], dtype=np.uint8
+        )
         pacman_spawn: Optional[GridPos] = None
         ghost_spawns: List[GridPos] = []
         for y, row in enumerate(self._layout):
@@ -144,7 +261,7 @@ class Maze:
             if pacman_spawn is None:
                 raise ValueError("Maze missing Pac-Man spawn and contains no walkable tiles.")
         self.pacman_spawn = pacman_spawn
-        self.ghost_spawns = ghost_spawns or [self.pacman_spawn]
+        self.ghost_spawns = ghost_spawns
         self._validate_layout()
 
     def in_bounds(self, pos: GridPos) -> bool:
@@ -165,16 +282,11 @@ class Maze:
 
     def reset(self) -> None:
         """Restore the pellet field to its initial state."""
-        self.pellets[:, :] = [[1 if ch in ".PG" else 0 for ch in row] for row in self._layout]
+        self.pellets[:, :] = [[1 if ch in ".PGo" else 0 for ch in row] for row in self._layout]
 
     def _validate_layout(self) -> None:
         """Ensure every pellet is reachable; repair layout when needed."""
-        walkable = {
-            (x, y)
-            for y in range(self.height)
-            for x in range(self.width)
-            if not self.is_wall((x, y))
-        }
+        walkable = {(x, y) for y in range(self.height) for x in range(self.width) if not self.is_wall((x, y))}
         if not walkable:
             raise ValueError("Maze contains no walkable tiles.")
 
@@ -204,14 +316,9 @@ class Maze:
 
         repaired_ghosts: List[GridPos] = []
         for pos in self.ghost_spawns:
-            repaired_ghosts.append(pos if pos in walkable else self.pacman_spawn)
-        if not repaired_ghosts:
-            repaired_ghosts = [self.pacman_spawn]
-        deduped: List[GridPos] = []
-        for pos in repaired_ghosts:
-            if pos not in deduped:
-                deduped.append(pos)
-        self.ghost_spawns = deduped
+            if pos in walkable and pos not in repaired_ghosts:
+                repaired_ghosts.append(pos)
+        self.ghost_spawns = repaired_ghosts
 
         for y, row in enumerate(self._layout):
             for x, ch in enumerate(row):
@@ -219,7 +326,7 @@ class Maze:
                     self._layout[y][x] = "."
         px, py = self.pacman_spawn
         self._layout[py][px] = "P"
-        self.pellets[py, px] = 1
+        self.pellets[py, px] = 0
         for gx, gy in self.ghost_spawns:
             if (gx, gy) != self.pacman_spawn:
                 self._layout[gy][gx] = "G"
@@ -292,17 +399,20 @@ class PacmanEnv:
         self.config, self.human_mode, self.headless = config, human_mode, headless
         self.maze = Maze(config.maze_layout)
         self.pacman = Pacman(self.maze.pacman_spawn)
-        self.ghosts = [Ghost(pos) for pos in self.maze.ghost_spawns]
-        self.screen: Optional[pygame.Surface]; self.surface: Optional[pygame.Surface]
+        self.ghost_spawn_points = list(self.maze.ghost_spawns)
+        self.ghosts = [Ghost(pos) for pos in self.ghost_spawn_points]
+        self.screen: Optional[pygame.Surface]
+        self.surface: Optional[pygame.Surface]
         self.screen = self.surface = None
         self.clock = pygame.time.Clock()
-        self._trajectory: List[Tuple[Dict[str, np.ndarray], Optional[int], float]] = []; self._recording = False
+        self._trajectory: List[Tuple[Dict[str, np.ndarray], Optional[int], float]] = []
+        self._recording = False
 
     def reset(self) -> Dict[str, np.ndarray]:
         """Reset the environment to the starting state."""
         self.maze.reset()
         self.pacman = Pacman(self.maze.pacman_spawn)
-        self.ghosts = [Ghost(pos) for pos in self.maze.ghost_spawns]
+        self.ghosts = [Ghost(pos) for pos in self.ghost_spawn_points]
         state = self._get_state()
         if self._recording:
             self._trajectory.clear()
@@ -427,7 +537,33 @@ class Game:
 
     def __init__(self, config: Optional[Config] = None) -> None:
         """Create a playable game instance with the provided configuration."""
-        self.config = config or Config()
+
+        # Example of a custom maze spec that you would use for simple RL training
+        # spec_stage1 = MazeSpec(
+        #     width=8,
+        #     height=8,
+        #     include_ghosts=False,
+        #     pellet_mode="full",
+        #     pellet_positions=[(1, 1)],
+        #     include_power_pellets=False,
+        #     surround_walls=True,
+        # )
+        # self.env = PacmanEnv(Config(maze_spec=spec_stage1), human_mode=True, headless=False)
+
+        # Example show how we can setup an exact matrix
+        # maze = (
+        #     "################",
+        #     "#P..#......#..G#",
+        #     "#.#.#.####.#.###",  # +#
+        #     "#.#.#....#.#..##",  # +#
+        #     "#.#.####.#.##.##",  # +#
+        #     "#.#......#....##",  # +#
+        #     "################",
+        # )
+        # self.env = PacmanEnv(Config(maze_layout=maze), human_mode=True)
+
+        # This runs in default game mode
+        self.config = config or Config(maze_size=2)
         self.env = PacmanEnv(self.config, human_mode=True)
 
     def run(self) -> None:
