@@ -407,6 +407,13 @@ class PacmanEnv:
         self.clock = pygame.time.Clock()
         self._trajectory: List[Tuple[Dict[str, np.ndarray], Optional[int], float]] = []
         self._recording = False
+        self._quit_requested = False
+
+    def _pump_events(self) -> None:
+        # Always keep OS/window events flowing even in non-human mode
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self._quit_requested = True
 
     def reset(self) -> Dict[str, np.ndarray]:
         """Reset the environment to the starting state."""
@@ -450,6 +457,12 @@ class PacmanEnv:
         """Render the current state to the screen or return an RGB array."""
         if not pygame.get_init():
             pygame.init()
+
+        # Pump events every frame to keep the window alive
+        self._pump_events()
+        if self._quit_requested:
+            return None
+
         size = (self.config.tile_size * self.config.width, self.config.tile_size * self.config.height)
 
         if mode == "human" and not self.headless:
@@ -539,16 +552,16 @@ class Game:
         """Create a playable game instance with the provided configuration."""
 
         # Example of a custom maze spec that you would use for simple RL training
-        # spec_stage1 = MazeSpec(
-        #     width=8,
-        #     height=8,
-        #     include_ghosts=False,
-        #     pellet_mode="full",
-        #     pellet_positions=[(1, 1)],
-        #     include_power_pellets=False,
-        #     surround_walls=True,
-        # )
-        # self.env = PacmanEnv(Config(maze_spec=spec_stage1), human_mode=True, headless=False)
+        spec_stage1 = MazeSpec(
+            width=2,
+            height=2,
+            include_ghosts=False,
+            pellet_mode="single",
+            pellet_positions=[(1, 1)],
+            include_power_pellets=False,
+            surround_walls=True,
+        )
+        self.env = PacmanEnv(Config(maze_spec=spec_stage1), human_mode=True, headless=False)
 
         # Example show how we can setup an exact matrix
         # maze = (
