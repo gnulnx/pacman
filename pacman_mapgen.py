@@ -1,501 +1,957 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-pacman_macro_mapgen.py
-Author: ChatGPT
+Pac-Man maze generator (Python renderer + bundled JS generator)
 
-Generates Pac-Man–style mazes using a macro-tile ("dojo") system
-and renders multiple mazes into a single image.
+- Calls the original JS algorithm (unchanged) to produce the ASCII tile string,
+  guaranteeing the same high-quality mazes as Shaun LeBron’s demo.
+- Renders curved walls & pellets in Python via Pillow by porting map.js
+  parseWalls/draw logic (including quadratic corner arcs via polyline sampling).
 
 Usage:
-  python pacman_macro_mapgen.py -n 16 --cols 4 --rows 4 --out mazes.png --seed 123
+  python pacman_mapgen.py              # single maze -> maze.png
+  python pacman_mapgen.py --seed 42    # deterministic maze
+  python pacman_mapgen.py --grid 4x3   # 4 cols × 3 rows collage -> grid.png
+  python pacman_mapgen.py --out my.png # custom filename for single image
+  python pacman_mapgen.py --tile 8     # change tile size (default 8)
+
+Requires:
+  - Python 3.9+
+  - Pillow: pip install pillow
+  - Node.js 16+: used to run the JS algorithm
 """
 
 import argparse
-import colorsys
+import math
+import os
 import random
+import shutil
+import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from PIL import Image, ImageDraw
 
-# ---------------------- Global map sizing ----------------------
-# Target classic-ish size: 28 x 36 (WxH)
-MAP_W, MAP_H = 28, 36
+# -------------------------------
+# Embedded JS (Shaun LeBron’s algorithm)
+# This is the *exact* logic from mapgen.js you pasted (genRandom + getTiles),
+# plus tiny glue to print the tile string. No rendering, just the tiles.
+# -------------------------------
 
-# We compose the LEFT HALF as a grid of macro-tiles,
-# then mirror horizontally to form the right half.
-# Each macro-tile has size TILE_H x TILE_W (rows x cols) on the grid.
-# Choose sizes that exactly tile MAP_H and MAP_W//2.
-TILE_H, TILE_W = 6, 7  # 6*6 = 36 rows, 7*2 = 14 cols (half of 28)
-TILES_H = MAP_H // TILE_H  # 6
-TILES_W_HALF = (MAP_W // 2) // TILE_W  # 2
+JS_ALGO = r"""
+// BEGIN: embedded pacman-mazegen (logic only) -------------------------------
+var getRandomInt = function(min,max) {
+    return Math.floor(Math.random() * (max-min+1)) + min;
+};
+var shuffle = function(list) {
+    var len = list.length;
+    for (var i=len-1; i>0; i--) {
+        var j = getRandomInt(0,i);
+        var t = list[i]; list[i] = list[j]; list[j] = t;
+    }
+};
+var randomElement = function(list) {
+    var len = list.length;
+    if (len > 0) return list[getRandomInt(0,len-1)];
+};
 
-# Rendering pixel size per cell
-PX = 8
+var UP = 0, RIGHT = 1, DOWN = 2, LEFT = 3;
+
+var cells = [];
+var tallRows = [];
+var narrowCols = [];
+
+var rows = 9;
+var cols = 5;
+
+function reset(seed) {
+    if (seed !== undefined) {                // simple LCG for deterministic mode
+      let s = Number(seed)>>>0;
+      Math.random = function(){
+        s = (1664525*s + 1013904223) >>> 0;
+        return (s >>> 8) / (1<<24);
+      }
+    }
+
+    cells = [];
+    for (var i=0; i<rows*cols; i++) {
+        cells[i] = { x:i%cols, y:Math.floor(i/cols), filled:false,
+            connect:[false,false,false,false], next:[], no:undefined, group:undefined };
+    }
+    for (var i=0; i<rows*cols; i++) {
+        var c = cells[i];
+        if (c.x>0) c.next[LEFT]=cells[i-1];
+        if (c.x<cols-1) c.next[RIGHT]=cells[i+1];
+        if (c.y>0) c.next[UP]=cells[i-cols];
+        if (c.y<rows-1) c.next[DOWN]=cells[i+cols];
+    }
+    var i=3*cols, c=cells[i];
+    c.filled=true; c.connect[LEFT]=c.connect[RIGHT]=c.connect[DOWN]=true;
+    i++; c=cells[i]; c.filled=true; c.connect[LEFT]=c.connect[DOWN]=true;
+    i+=cols-1; c=cells[i]; c.filled=true; c.connect[LEFT]=c.connect[UP]=c.connect[RIGHT]=true;
+    i++; c=cells[i]; c.filled=true; c.connect[UP]=c.connect[LEFT]=true;
+}
+
+function genRandom(seed){
+  reset(seed);
+
+  function getLeftMostEmptyCells(){
+    var left=[];
+    for (var x=0; x<cols; x++){
+      for (var y=0; y<rows; y++){
+        var c=cells[x+y*cols];
+        if(!c.filled) left.push(c);
+      }
+      if(left.length>0) break;
+    }
+    return left;
+  }
+  function isOpenCell(cell,i,prevDir,size){
+    if ((cell.y==6 && cell.x==0 && i==DOWN) || (cell.y==7 && cell.x==0 && i==UP)) return false;
+    if (size==2 && (i==prevDir || (i+2)%4==prevDir)) return false;
+    if (cell.next[i] && !cell.next[i].filled){
+      if (cell.next[i].next[LEFT] && !cell.next[i].next[LEFT].filled) {}
+      else return true;
+    }
+    return false;
+  }
+  function getOpenCells(cell,prevDir,size){
+    var open=[], n=0;
+    for (var i=0;i<4;i++){ if (isOpenCell(cell,i,prevDir,size)){ open.push(i); n++; } }
+    return {openCells:open, numOpenCells:n};
+  }
+  function connectCell(cell,dir){
+    cell.connect[dir]=true;
+    cell.next[dir].connect[(dir+2)%4]=true;
+    if (cell.x==0 && dir==RIGHT) cell.connect[LEFT]=true;
+  }
+
+  function gen(){
+    var cell,newCell,firstCell,openCells,numOpenCells,dir,i;
+    var numFilled=0, numGroups, size;
+    var probStop=[0,0,0.10,0.5,0.75,1];
+    var singleCount={}; singleCount[0]=singleCount[rows-1]=0;
+    var probTopBotSingle=0.35;
+    var longPieces=0, maxLongPieces=1, pSize2=1, pSize34=0.5;
+    function fillCell(c){ c.filled=true; c.no=numFilled++; c.group=numGroups; }
+
+    for (numGroups=0;;numGroups++){
+      openCells=getLeftMostEmptyCells(); numOpenCells=openCells.length;
+      if (numOpenCells==0) break;
+      firstCell=cell=openCells[getRandomInt(0,numOpenCells-1)];
+      fillCell(cell);
+
+      if (cell.x<cols-1 && (cell.y in singleCount) && Math.random()<=probTopBotSingle){
+        if (singleCount[cell.y]==0){ cell.connect[cell.y==0?UP:DOWN]=true; singleCount[cell.y]++; continue; }
+      }
+      size=1;
+      if (cell.x==cols-1){ cell.connect[RIGHT]=true; cell.isRaiseHeightCandidate=true; }
+      else {
+        while (size<5){
+          var stop=false;
+
+          if (size==2){
+            var c=firstCell;
+            if (c.x>0 && c.connect[RIGHT] && c.next[RIGHT] && c.next[RIGHT].next[RIGHT]){
+              if (longPieces<maxLongPieces && Math.random()<=pSize2){
+                c=c.next[RIGHT].next[RIGHT];
+                var dirs={};
+                if (isOpenCell(c,UP)) dirs[UP]=true;
+                if (isOpenCell(c,DOWN)) dirs[DOWN]=true;
+                if (dirs[UP] && dirs[DOWN]) i=[UP,DOWN][getRandomInt(0,1)];
+                else if (dirs[UP]) i=UP;
+                else if (dirs[DOWN]) i=DOWN;
+                else i=undefined;
+                if (i!=undefined){
+                  connectCell(c,LEFT); fillCell(c);
+                  connectCell(c,i);    fillCell(c.next[i]);
+                  longPieces++; size+=2; stop=true;
+                }
+              }
+            }
+          }
+
+          if (!stop){
+            var res=getOpenCells(cell,dir,size);
+            openCells=res.openCells; numOpenCells=res.numOpenCells;
+            if (numOpenCells==0 && size==2){
+              cell=newCell;
+              res=getOpenCells(cell,dir,size);
+              openCells=res.openCells; numOpenCells=res.numOpenCells;
+            }
+            if (numOpenCells==0){ stop=true; }
+            else{
+              dir=openCells[getRandomInt(0,numOpenCells-1)];
+              newCell=cell.next[dir];
+              connectCell(cell,dir); fillCell(newCell); size++;
+              if (firstCell.x==0 && size==3) stop=true;
+              if (Math.random()<=probStop[size]) stop=true;
+            }
+          }
+
+          if (stop){
+            if (size==2){
+              var c=firstCell;
+              if (c.x==cols-1){
+                if (c.connect[UP]) c=c.next[UP];
+                c.connect[RIGHT]=c.next[DOWN].connect[RIGHT]=true;
+              }
+            } else if (size==3 || size==4){
+              if (longPieces<maxLongPieces && firstCell.x>0 && Math.random()<=pSize34){
+                var dirs=[], dl=0;
+                for (i=0;i<4;i++){
+                  if (cell.connect[i] && isOpenCell(cell.next[i],i)){ dirs.push(i); dl++; }
+                }
+                if (dl>0){
+                  i=dirs[getRandomInt(0,dl-1)];
+                  c=cell.next[i]; connectCell(c,i); fillCell(c.next[i]); longPieces++;
+                }
+              }
+            }
+            break;
+          }
+        }
+      }
+    }
+    setResizeCandidates();
+  }
+
+  function setResizeCandidates(){
+    for (var i=0;i<rows*cols;i++){
+      var c=cells[i], x=i%cols, y=Math.floor(i/cols), q=c.connect;
+
+      if ((c.x==0 || !q[LEFT]) && (c.x==cols-1 || !q[RIGHT]) && q[UP]!=q[DOWN]) {
+        c.isRaiseHeightCandidate=true;
+      }
+      var c2=c.next[RIGHT]; if (c2){
+        var q2=c2.connect;
+        if (((c.x==0 || !q[LEFT]) && !q[UP] && !q[DOWN]) && ((c2.x==cols-1 || !q2[RIGHT]) && !q2[UP] && !q2[DOWN])){
+          c.isRaiseHeightCandidate=c2.isRaiseHeightCandidate=true;
+        }
+      }
+      if (c.x==cols-1 && q[RIGHT]) c.isShrinkWidthCandidate=true;
+      if ((c.y==0||!q[UP]) && (c.y==rows-1||!q[DOWN]) && q[LEFT]!=q[RIGHT]) c.isShrinkWidthCandidate=true;
+    }
+  }
+
+  function cellIsCrossCenter(c){ return c.connect[UP]&&c.connect[RIGHT]&&c.connect[DOWN]&&c.connect[LEFT]; }
+
+  function chooseNarrowCols(){
+    function canShrinkWidth(x,y){
+      if (y==rows-1) return true;
+      var x0,c,c2;
+      for(x0=x;x0<cols;x0++){
+        c=cells[x0+y*cols]; c2=c.next[DOWN];
+        if((!c.connect[RIGHT]||cellIsCrossCenter(c)) && (!c2.connect[RIGHT]||cellIsCrossCenter(c2))) break;
+      }
+      var candidates=[], n=0;
+      for(;c2;c2=c2.next[LEFT]){
+        if (c2.isShrinkWidthCandidate){ candidates.push(c2); n++; }
+        if((!c2.connect[LEFT]||cellIsCrossCenter(c2)) && (!c2.next[UP].connect[LEFT]||cellIsCrossCenter(c2.next[UP]))) break;
+      }
+      shuffle(candidates);
+      for (var i=0;i<n;i++){
+        c2=candidates[i];
+        if (canShrinkWidth(c2.x,c2.y)){ c2.shrinkWidth=true; narrowCols[c2.y]=c2.x; return true; }
+      }
+      return false;
+    }
+    for (var x=cols-1;x>=0;x--){
+      var c=cells[x];
+      if (c.isShrinkWidthCandidate && canShrinkWidth(x,0)){ c.shrinkWidth=true; narrowCols[c.y]=c.x; return true; }
+    }
+    return false;
+  }
+
+  function chooseTallRows(){
+    function canRaiseHeight(x,y){
+      if (x==cols-1) return true;
+      var y0,c,c2;
+      for(y0=y;y0>=0;y0--){
+        c=cells[x+y0*cols]; c2=c.next[RIGHT];
+        if((!c.connect[UP]||cellIsCrossCenter(c)) && (!c2.connect[UP]||cellIsCrossCenter(c2))) break;
+      }
+      var candidates=[], n=0;
+      for(;c2;c2=c2.next[DOWN]){
+        if(c2.isRaiseHeightCandidate){ candidates.push(c2); n++; }
+        if((!c2.connect[DOWN]||cellIsCrossCenter(c2)) && (!c2.next[LEFT].connect[DOWN]||cellIsCrossCenter(c2.next[LEFT]))) break;
+      }
+      shuffle(candidates);
+      for (var i=0;i<n;i++){
+        c2=candidates[i];
+        if (canRaiseHeight(c2.x,c2.y)){ c2.raiseHeight=true; tallRows[c2.x]=c2.y; return true; }
+      }
+      return false;
+    }
+    for (var y=0;y<3;y++){
+      var c=cells[y*cols];
+      if (c.isRaiseHeightCandidate && canRaiseHeight(0,y)){ c.raiseHeight=true; tallRows[c.x]=c.y; return true; }
+    }
+    return false;
+  }
+
+  function isDesirable(){
+    var c=cells[4]; if (c.connect[UP] || c.connect[RIGHT]) return false;
+    c=cells[rows*cols-1]; if (c.connect[DOWN]||c.connect[RIGHT]) return false;
+
+    function isH(x,y){ var q1=cells[x+y*cols].connect, q2=cells[x+1+y*cols].connect;
+      return !q1[UP]&&!q1[DOWN]&&(x==0||!q1[LEFT])&&q1[RIGHT] && !q2[UP]&&!q2[DOWN]&&q2[LEFT]&&!q2[RIGHT];
+    }
+    function isV(x,y){ var q1=cells[x+y*cols].connect, q2=cells[x+(y+1)*cols].connect;
+      if (x==cols-1) return !q1[LEFT]&&!q1[UP]&&!q1[DOWN] && !q2[LEFT]&&!q2[UP]&&!q2[DOWN];
+      return !q1[LEFT]&&!q1[RIGHT]&&!q1[UP]&&q1[DOWN] && !q2[LEFT]&&!q2[RIGHT]&&q2[UP]&&!q2[DOWN];
+    }
+    for (var y=0;y<rows-1;y++){
+      for (var x=0;x<cols-1;x++){
+        if ( (isH(x,y)&&isH(x,y+1)) || (isV(x,y)&&isV(x+1,y)) ){
+          if (x==0) return false;
+          cells[x+y*cols].connect[DOWN]=true; cells[x+y*cols].connect[RIGHT]=true; var g=cells[x+y*cols].group;
+          cells[x+1+y*cols].connect[DOWN]=true; cells[x+1+y*cols].connect[LEFT]=true; cells[x+1+y*cols].group=g;
+          cells[x+(y+1)*cols].connect[UP]=true; cells[x+(y+1)*cols].connect[RIGHT]=true; cells[x+(y+1)*cols].group=g;
+          cells[x+1+(y+1)*cols].connect[UP]=true; cells[x+1+(y+1)*cols].connect[LEFT]=true; cells[x+1+(y+1)*cols].group=g;
+        }
+      }
+    }
+    if (!chooseTallRows()) return false;
+    if (!chooseNarrowCols()) return false;
+    return true;
+  }
+
+  function setUpScale(){
+    for (var i=0;i<rows*cols;i++){
+      var c=cells[i];
+      c.final_x=c.x*3; if (narrowCols[c.y] < c.x) c.final_x--;
+      c.final_y=c.y*3; if (tallRows[c.x]   < c.y) c.final_y++;
+      c.final_w=c.shrinkWidth?2:3;
+      c.final_h=c.raiseHeight?4:3;
+    }
+  }
+
+  function createTunnels(){
+    var single=[], topS=[], botS=[];
+    var voids=[], topV=[], botV=[];
+    var edge=[],  topE=[], botE=[];
+    var doubles=[];
+    var numT=0;
+
+    for (var y=0;y<rows;y++){
+      var c=cells[cols-1+y*cols];
+      if (c.connect[UP]) continue;
+      if (c.y>1 && c.y<rows-2){ c.isEdgeTunnelCandidate=true; edge.push(c); if(c.y<=2)topE.push(c); else if(c.y>=5)botE.push(c); }
+      var upDead=(!c.next[UP]||c.next[UP].connect[RIGHT]);
+      var dnDead=(!c.next[DOWN]||c.next[DOWN].connect[RIGHT]);
+      if (c.connect[RIGHT]){
+        if (upDead){ c.isVoidTunnelCandidate=true; voids.push(c); if(c.y<=2)topV.push(c); else if(c.y>=6)botV.push(c); }
+      } else {
+        if (c.connect[DOWN]) continue;
+        if (upDead != dnDead){
+          if(!c.raiseHeight && y<rows-1 && !c.next[LEFT].connect[LEFT]){
+            single.push(c); c.isSingleDeadEndCandidate=true; c.singleDeadEndDir=upDead?UP:DOWN;
+            var off = upDead?1:0;
+            if (c.y<=1+off) topS.push(c); else if (c.y>=5+off) botS.push(c);
+          }
+        } else if (upDead && dnDead){
+          if (y>0 && y<rows-1){
+            if (c.next[LEFT].connect[UP] && c.next[LEFT].connect[DOWN]){
+              c.isDoubleDeadEndCandidate=true;
+              if (c.y>=2 && c.y<=5) doubles.push(c);
+            }
+          }
+        }
+      }
+    }
+
+    function pickSingle(c){ c.connect[RIGHT]=true; if (c.singleDeadEndDir==UP) c.topTunnel=true; else c.next[DOWN].topTunnel=true; }
+
+    var c;
+    var want = Math.random()<=0.45 ? 2 : 1;
+    if (want==1){
+      if      (c=randomElement(voids))  c.topTunnel=true;
+      else if (c=randomElement(single)) pickSingle(c);
+      else if (c=randomElement(edge))   c.topTunnel=true;
+      else return false;
+    } else {
+      if (c=randomElement(doubles)){
+        c.connect[RIGHT]=true; c.topTunnel=true; c.next[DOWN].topTunnel=true;
+      } else {
+        var made=0;
+        if      (c=randomElement(topV)) { c.topTunnel=true; made=1; }
+        else if (c=randomElement(topS)) { pickSingle(c);   made=1; }
+        else if (c=randomElement(topE)) { c.topTunnel=true; made=1; }
+        if      (c=randomElement(botV)) { c.topTunnel=true; }
+        else if (c=randomElement(botS)) { pickSingle(c);   }
+        else if (c=randomElement(botE)) { c.topTunnel=true; }
+        else if (!made) return false;
+      }
+    }
+
+    // forbid straight-through corridors
+    for (var y=0;y<rows;y++){
+      c=cells[cols-1+y*cols];
+      if (c.topTunnel){
+        var exit=true, topy=c.final_y;
+        while(c.next[LEFT]){
+          c=c.next[LEFT];
+          if(!c.connect[UP] && c.final_y==topy) continue;
+          else { exit=false; break; }
+        }
+        if (exit) return false;
+      }
+    }
+
+    // clear unused void tunnels
+    for (var k=0;k<voids.length;k++){
+      c=voids[k];
+      if(!c.topTunnel){
+        var og=c.group, ng=c.next[UP].group;
+        for (var i=0;i<rows*cols;i++){ var u=cells[i]; if(u.group==og) u.group=ng; }
+        c.connect[UP]=true; c.next[UP].connect[DOWN]=true;
+      }
+    }
+    return true;
+  }
+
+  function joinWalls(){
+    var x,y,c,c2;
+    for (x=0;x<cols;x++){
+      c=cells[x];
+      if(!c.connect[LEFT]&&!c.connect[RIGHT]&&!c.connect[UP] && (!c.connect[DOWN]||!c.next[DOWN].connect[DOWN])){
+        if((!c.next[LEFT]||!c.next[LEFT].connect[UP]) && (c.next[RIGHT] && !c.next[RIGHT].connect[UP])){
+          if(!(c.next[DOWN]&&c.next[DOWN].connect[RIGHT]&&c.next[DOWN].next[RIGHT].connect[RIGHT])){
+            c.isJoinCandidate=true; if(Math.random()<=0.25) c.connect[UP]=true;
+          }
+        }
+      }
+    }
+    for (x=0;x<cols;x++){
+      c=cells[x+(rows-1)*cols];
+      if(!c.connect[LEFT]&&!c.connect[RIGHT]&&!c.connect[DOWN] && (!c.connect[UP]||!c.next[UP].connect[UP])){
+        if((!c.next[LEFT]||!c.next[LEFT].connect[DOWN]) && (c.next[RIGHT] && !c.next[RIGHT].connect[DOWN])){
+          if(!(c.next[UP]&&c.next[UP].connect[RIGHT]&&c.next[UP].next[RIGHT].connect[RIGHT])){
+            c.isJoinCandidate=true; if(Math.random()<=0.25) c.connect[DOWN]=true;
+          }
+        }
+      }
+    }
+    for (y=1;y<rows-1;y++){
+      c=cells[cols-1+y*cols];
+      if(c.raiseHeight) continue;
+      if(!c.connect[RIGHT]&&!c.connect[UP]&&!c.connect[DOWN] && !c.next[UP].connect[RIGHT]&&!c.next[DOWN].connect[RIGHT]){
+        if(c.connect[LEFT]){
+          c2=c.next[LEFT];
+          if(!c2.connect[UP]&&!c2.connect[DOWN]&&!c2.connect[LEFT]){
+            c.isJoinCandidate=true; if(Math.random()<=0.5) c.connect[RIGHT]=true;
+          }
+        }
+      }
+    }
+  }
+
+  var tries=0;
+  while(tries < 1000){
+    tries++;
+    gen();
+    if(!isDesirable()) continue;
+    setUpScale();
+    joinWalls();
+    if(!createTunnels()) continue;
+    break;
+  }
+}
+
+function getTiles(){
+  var tiles=[];
+  var tileCells=[];
+  var subrows=rows*3+1+3;
+  var subcols=cols*3-1+2;
+  var midcols=subcols-2;
+  var fullcols=(subcols-2)*2;
+
+  function setTile(x,y,v){
+    if(x<0||x>subcols-1||y<0||y>subrows-1) return;
+    x -= 2;
+    tiles[midcols+x+y*fullcols]=v;
+    tiles[midcols-1-x+y*fullcols]=v;
+  }
+  function getTile(x,y){
+    if(x<0||x>subcols-1||y<0||y>subrows-1) return undefined;
+    x -= 2;
+    return tiles[midcols+x+y*fullcols];
+  }
+  function setTileCell(x,y,cell){
+    if(x<0||x>subcols-1||y<0||y>subrows-1) return;
+    x -= 2;
+    tileCells[x+y*subcols]=cell;
+  }
+  function getTileCell(x,y){
+    if(x<0||x>subcols-1||y<0||y>subrows-1) return undefined;
+    x -= 2;
+    return tileCells[x+y*subcols];
+  }
+
+  for (var i=0;i<subrows*fullcols;i++) tiles.push('_');
+  for (var i=0;i<subrows*subcols;i++) tileCells.push(undefined);
+
+  for (var i=0;i<rows*cols;i++){
+    var c=cells[i];
+    for (var x0=0;x0<c.final_w;x0++){
+      for (var y0=0;y0<c.final_h;y0++){
+        setTileCell(c.final_x+x0,c.final_y+1+y0,c);
+      }
+    }
+  }
+
+  for (var y=0;y<subrows;y++){
+    for (var x=0;x<subcols;x++){
+      var c=getTileCell(x,y), cl=getTileCell(x-1,y), cu=getTileCell(x,y-1);
+      if (c){
+        if (cl && c.group != cl.group || cu && c.group != cu.group || !cu && !c.connect[UP]) {
+          setTile(x,y,'.');
+        }
+      } else {
+        if (cl && (!cl.connect[RIGHT] || getTile(x-1,y)=='.') ||
+            cu && (!cu.connect[DOWN]  || getTile(x,y-1)=='.')) {
+          setTile(x,y,'.');
+        }
+      }
+      if (getTile(x-1,y)=='.' && getTile(x,y-1)=='.' && getTile(x-1,y-1)=='_'){
+        setTile(x,y,'.');
+      }
+    }
+  }
+
+  for (var c=cells[cols-1]; c; c=c.next[DOWN]){
+    if (c.topTunnel){
+      var y=c.final_y+1;
+      setTile(subcols-1,y,'.'); setTile(subcols-2,y,'.');
+    }
+  }
+
+  for (var y=0;y<subrows;y++){
+    for (var x=0;x<subcols;x++){
+      if (getTile(x,y)!='.' && (getTile(x-1,y)=='.'||getTile(x,y-1)=='.'||getTile(x+1,y)=='.'||getTile(x,y+1)=='.'||
+          getTile(x-1,y-1)=='.'||getTile(x+1,y-1)=='.'||getTile(x+1,y+1)=='.'||getTile(x-1,y+1)=='.')){
+        setTile(x,y,'|');
+      }
+    }
+  }
+
+  setTile(2,12,'-');
+
+  function getTopRange(){
+    var miny, maxy=subrows/2, x=subcols-2;
+    for (var y=2;y<maxy;y++){ if(getTile(x,y)=='.'&&getTile(x,y+1)=='.'){ miny=y+1; break; } }
+    maxy=Math.min(maxy,miny+7);
+    for (var y=miny+1;y<maxy;y++){ if(getTile(x-1,y)=='.'){ maxy=y-1; break; } }
+    return {miny:miny, maxy:maxy};
+  }
+  function getBotRange(){
+    var miny=subrows/2, maxy, x=subcols-2;
+    for (var y=subrows-3;y>=miny;y--){ if(getTile(x,y)=='.'&&getTile(x,y+1)=='.'){ maxy=y; break; } }
+    miny=Math.max(miny,maxy-7);
+    for (var y=maxy-1;y>miny;y--){ if(getTile(x-1,y)=='.'){ miny=y+1; break; } }
+    return {miny:miny, maxy:maxy};
+  }
+  var x=subcols-2, range, y;
+  if (range=getTopRange()){ y=getRandomInt(range.miny,range.maxy); setTile(x,y,'o'); }
+  if (range=getBotRange()){ y=getRandomInt(range.miny,range.maxy); setTile(x,y,'o'); }
+
+  function eraseUntil(x,y){
+    while(true){
+      var adj=[];
+      if(getTile(x-1,y)=='.') adj.push({x:x-1,y:y});
+      if(getTile(x+1,y)=='.') adj.push({x:x+1,y:y});
+      if(getTile(x,y-1)=='.') adj.push({x:x,y:y-1});
+      if(getTile(x,y+1)=='.') adj.push({x:x,y:y+1});
+      if(adj.length==1){ setTile(x,y,' '); x=adj[0].x; y=adj[0].y; }
+      else break;
+    }
+  }
+  x=subcols-1;
+  for (var y=0;y<subrows;y++){ if(getTile(x,y)=='.') eraseUntil(x,y); }
+
+  setTile(1,subrows-8,' ');
+
+  for (var i=0;i<7;i++){
+    var y=subrows-14; setTile(i,y,' '); var j=1;
+    while(getTile(i,y+j)=='.' && getTile(i-1,y+j)=='|' && getTile(i+1,y+j)=='|'){ setTile(i,y+j,' '); j++; }
+    y=subrows-20; setTile(i,y,' '); j=1;
+    while(getTile(i,y-j)=='.' && getTile(i-1,y-j)=='|' && getTile(i+1,y-j)=='|'){ setTile(i,y-j,' '); j++; }
+  }
+  for (var i=0;i<7;i++){
+    var x=6, y=subrows-14-i; setTile(x,y,' '); var j=1;
+    while(getTile(x+j,y)=='.' && getTile(x+j,y-1)=='|' && getTile(x+j,y+1)=='|'){ setTile(x+j,y,' '); j++; }
+  }
+
+  return "____________________________".repeat(3) + tiles.join("") + "____________________________".repeat(2);
+}
+
+// Entrypoint: generate and print tiles (optionally seeded)
+(function(){
+  var seed = process.env.PACMAN_SEED;
+  genRandom(seed);
+  var t = getTiles();
+  process.stdout.write(t);
+})();
+ // END: embedded pacman-mazegen ---------------------------------------------
+"""
+
+# -------------------------------
+# Python port of map.js wall pathing + renderer
+# -------------------------------
+
+TILE_SIZE_DEFAULT = 8
 
 
-# ---------------------- Helpers ----------------------
-def hsl_to_rgb(h: float, s: float, l: float) -> Tuple[int, int, int]:
-    r, g, b = colorsys.hls_to_rgb(h, l, s)
-    return (int(r * 255), int(g * 255), int(b * 255))
+def rgb(hexstr: str) -> Tuple[int, int, int]:
+    hexstr = hexstr.lstrip("#")
+    return tuple(int(hexstr[i : i + 2], 16) for i in (0, 2, 4))
 
 
-def random_wall_palette(seed=None) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
-    rnd = random.Random(seed)
-    hue = rnd.random()
-    wall_fill = hsl_to_rgb(hue, 1.0, 0.60)
-    wall_stroke = hsl_to_rgb((hue + 0.55) % 1.0, 0.6, 0.65)
-    return wall_fill, wall_stroke
+def qbezier(p0, p1, c, steps=16) -> List[Tuple[float, float]]:
+    """Sample a quadratic Bezier from p0 -> p1 with control c."""
+    pts = []
+    for k in range(steps + 1):
+        t = k / steps
+        x = (1 - t) * (1 - t) * p0[0] + 2 * (1 - t) * t * c[0] + t * t * p1[0]
+        y = (1 - t) * (1 - t) * p0[1] + 2 * (1 - t) * t * c[1] + t * t * p1[1]
+        pts.append((x, y))
+    return pts
 
 
-# ---------------------- Macro-tile system ----------------------
-# Tile characters:
-# ' ' = path / floor, '.' = pellet placeholder (converted later), '|' = wall
-# We will ensure all floor inside tiles touch the tile edges only at specific connector slots.
-#
-# Each macro-tile declares which edge slots are "open" (floor reaches boundary).
-# For simplicity, we place potential connectors at fixed offsets:
-#  - Left/Right edges: y in {2, 3} (0-indexed within tile height)
-#  - Top/Bottom edges: x in {3} (middle column inside 7-wide tile)
-#
-LEFT_SLOTS = (2, 3)
-RIGHT_SLOTS = (2, 3)
-TOP_SLOTS = (3,)
-BOT_SLOTS = (3,)
+@dataclass
+class MapPy:
+    numCols: int
+    numRows: int
+    tiles: str
+    tileSize: int = TILE_SIZE_DEFAULT
+    wallFillColor: Tuple[int, int, int] = (0, 51, 255)
+    wallStrokeColor: Tuple[int, int, int] = (255, 255, 255)
+    pelletColor: Tuple[int, int, int] = (255, 184, 174)
 
+    def __post_init__(self):
+        self.widthPixels = self.numCols * self.tileSize
+        self.heightPixels = self.numRows * self.tileSize
+        self.resetCurrent()
+        self.parseWalls()
 
-@dataclass(frozen=True)
-class MacroTile:
-    name: str
-    # 2D pattern (rows of length TILE_W)
-    grid: Tuple[str, ...]
-    # Open connectors on edges: indices relative to that edge
-    open_left: Tuple[int, ...]
-    open_right: Tuple[int, ...]
-    open_top: Tuple[int, ...]
-    open_bot: Tuple[int, ...]
+    def resetCurrent(self):
+        self.currentTiles = list(self.tiles)
 
-    def rotated(self, k: int = 0) -> "MacroTile":
-        """Return a tile rotated 90*k degrees (k in {0,1,2,3})."""
-        g = [list(row) for row in self.grid]
-        for _ in range(k % 4):
-            # rotate 90 deg clockwise
-            g = [list(row) for row in zip(*g[::-1])]
-        # ensure dimensions stay TILE_H x TILE_W
-        if len(g) != TILE_H or len(g[0]) != TILE_W:
-            # we don't rotate non-square here; only return same orientation
-            return self
+    def posToIndex(self, x: int, y: int) -> Optional[int]:
+        if 0 <= x < self.numCols and 0 <= y < self.numRows:
+            return x + y * self.numCols
+        return None
 
-        # recompute connectors by rotating coordinate frame
-        def rot_edge(open_set, edge):
-            # edge: 'L','R','T','B'
-            # we know allowed slot coords on each edge:
-            # left/right: y indices; top/bot: x indices
-            out = []
-            for v in open_set:
-                if edge == "L":
-                    # slot at (x=0, y=v)
-                    x, y = 0, v
-                elif edge == "R":
-                    x, y = TILE_W - 1, v
-                elif edge == "T":
-                    x, y = v, 0
-                else:
-                    x, y = v, TILE_H - 1
-                # rotate 90 deg clockwise around tile
-                xr, yr = y, TILE_W - 1 - x
-                out.append((xr, yr))
-            # Map rotated coordinates back to slots on new edges
-            # Determine new edge per rotated location
-            left, right, top, bot = [], [], [], []
-            for xr, yr in out:
-                if xr == 0:
-                    top.append(yr)  # since after rotation, x-axis swapped, careful, but we only use existing sets
-                elif xr == TILE_W - 1:
-                    bot.append(yr)
-                elif yr == 0:
-                    left.append(xr)
-                elif yr == TILE_H - 1:
-                    right.append(xr)
-            # We cannot robustly generalize across non-square; skip rotation usage.
-            return ()
+    def getTile(self, x: int, y: int) -> Optional[str]:
+        idx = self.posToIndex(x, y)
+        if idx is not None:
+            return self.currentTiles[idx]
+        # tunnel extension logic (copy of map.js)
+        if (
+            x == -1
+            and self.getTile(x + 1, y) == "|"
+            and (self.isFloorTile(x + 1, y + 1) or self.isFloorTile(x + 1, y - 1))
+        ) or (
+            x == self.numCols
+            and self.getTile(x - 1, y) == "|"
+            and (self.isFloorTile(x - 1, y + 1) or self.isFloorTile(x - 1, y - 1))
+        ):
+            return "|"
+        if (x == -1 and self.isFloorTile(x + 1, y)) or (x == self.numCols and self.isFloorTile(x - 1, y)):
+            return " "
+        return None
 
-        # For non-square tiles, avoid rotation to keep connectors consistent.
-        return MacroTile(
-            self.name, tuple("".join(row) for row in g), self.open_left, self.open_right, self.open_top, self.open_bot
-        )
+    @staticmethod
+    def isFloorTileChar(ch: str) -> bool:
+        return ch in (" ", ".", "o")
 
+    def isFloorTile(self, x: int, y: int) -> bool:
+        t = self.getTile(x, y)
+        return t is not None and self.isFloorTileChar(t)
 
-def pad_room(pattern: List[str]) -> Tuple[str, ...]:
-    """Ensure pattern is TILE_H x TILE_W."""
-    out = []
-    for r in pattern[:TILE_H]:
-        r = (r + " " * TILE_W)[:TILE_W]
-        out.append(r)
-    while len(out) < TILE_H:
-        out.append(" " * TILE_W)
-    return tuple(out)
+    # --- parseWalls port (build curved polygon paths) ---
+    def parseWalls(self):
+        DIR_UP, DIR_RIGHT, DIR_DOWN, DIR_LEFT = 0, 1, 2, 3
 
-
-# Define a small library of tiles (left-half primitives).
-# Ensure internal corridors connect to edges only at declared slots.
-TILES: List[MacroTile] = []
-
-# Straight vertical corridor through center
-TILES.append(
-    MacroTile(
-        "I_v",
-        pad_room(
-            [
-                "   |   ",
-                "   |   ",
-                "   |   ",
-                "   |   ",
-                "   |   ",
-                "   |   ",
-            ]
-        ),
-        open_left=(),
-        open_right=(),
-        open_top=TOP_SLOTS,
-        open_bot=BOT_SLOTS,
-    )
-)
-
-# Straight horizontal corridor mid rows
-TILES.append(
-    MacroTile(
-        "I_h",
-        pad_room(
-            [
-                "       ",
-                " ||||| ",
-                "       ",
-                " ||||| ",
-                "       ",
-                "       ",
-            ]
-        ),
-        open_left=LEFT_SLOTS,
-        open_right=RIGHT_SLOTS,
-        open_top=(),
-        open_bot=(),
-    )
-)
-
-# Corner: connects top -> right (turn)
-TILES.append(
-    MacroTile(
-        "L_tr",
-        pad_room(
-            [
-                "   |   ",
-                "   |   ",
-                "   |   ",
-                " ||    ",
-                "       ",
-                "       ",
-            ]
-        ),
-        open_left=(),
-        open_right=(2,),  # right slot at y=2 (approx mid)
-        open_top=(3,),
-        open_bot=(),
-    )
-)
-
-# Corner: connects left -> bot
-TILES.append(
-    MacroTile(
-        "L_lb",
-        pad_room(
-            [
-                "       ",
-                "       ",
-                "    || ",
-                "   |   ",
-                "   |   ",
-                "   |   ",
-            ]
-        ),
-        open_left=(3,),
-        open_right=(),
-        open_top=(),
-        open_bot=(3,),
-    )
-)
-
-# T junction: left + right + top
-TILES.append(
-    MacroTile(
-        "T_top",
-        pad_room(
-            [
-                "   |   ",
-                "   |   ",
-                "|||||||",
-                "       ",
-                "       ",
-                "       ",
-            ]
-        ),
-        open_left=LEFT_SLOTS,
-        open_right=RIGHT_SLOTS,
-        open_top=(3,),
-        open_bot=(),
-    )
-)
-
-# Cross (+): all directions
-TILES.append(
-    MacroTile(
-        "Cross",
-        pad_room(
-            [
-                "   |   ",
-                "   |   ",
-                "|||||||",
-                "   |   ",
-                "   |   ",
-                "       ",
-            ]
-        ),
-        open_left=LEFT_SLOTS,
-        open_right=RIGHT_SLOTS,
-        open_top=(3,),
-        open_bot=(3,),
-    )
-)
-
-# Empty / room (few internal walls)
-TILES.append(
-    MacroTile(
-        "Room",
-        pad_room(
-            [
-                "|||||||",
-                "|     |",
-                "|     |",
-                "|     |",
-                "|     |",
-                "|||||||",
-            ]
-        ),
-        open_left=(),
-        open_right=(),
-        open_top=(),
-        open_bot=(),
-    )
-)
-
-
-# ---------------------- Composition ----------------------
-def compose_left_half(seed: Optional[int] = None) -> List[List[str]]:
-    rnd = random.Random(seed)
-    half = [[" " for _ in range(MAP_W // 2)] for _ in range(MAP_H)]
-
-    # choose a tile for each macro cell with simple adjacency constraints:
-    # - horizontally: right openings must match left openings of neighbor
-    # - vertically: bottom openings must match top openings of cell below
-    # to keep it simple, we randomly resample until constraints satisfied (grid is small).
-    grid_tiles: List[List[MacroTile]] = [[None for _ in range(TILES_W_HALF)] for _ in range(TILES_H)]
-
-    def compatible_h(a: MacroTile, b: MacroTile) -> bool:
-        if a is None or b is None:
-            return True
-        return bool(a.open_right) == bool(b.open_left)
-
-    def compatible_v(a: MacroTile, b: MacroTile) -> bool:
-        if a is None or b is None:
-            return True
-        return bool(a.open_bot) == bool(b.open_top)
-
-    for r in range(TILES_H):
-        for c in range(TILES_W_HALF):
-            tries = 0
-            while True:
-                tile = rnd.choice(TILES)
-                left_ok = compatible_h(grid_tiles[r][c - 1], tile) if c > 0 else True
-                up_ok = compatible_v(grid_tiles[r - 1][c], tile) if r > 0 else True
-                # discourage Room on borders (keeps perimeter open for walls later)
-                if (r in (0, TILES_H - 1) or c == 0) and tile.name == "Room":
-                    cond_room = rnd.random() < 0.2
-                else:
-                    cond_room = True
-                if left_ok and up_ok and cond_room:
-                    grid_tiles[r][c] = tile
-                    break
-                tries += 1
-                if tries > 50:
-                    grid_tiles[r][c] = rnd.choice(TILES)
-                    break
-
-    # paint tiles into half-grid
-    for r in range(TILES_H):
-        for c in range(TILES_W_HALF):
-            t = grid_tiles[r][c]
-            base_y = r * TILE_H
-            base_x = c * TILE_W
-            for dy in range(TILE_H):
-                row = t.grid[dy]
-                for dx in range(TILE_W):
-                    ch = row[dx]
-                    if ch != " ":
-                        half[base_y + dy][base_x + dx] = ch
-
-            # carve connectors into edges if declared
-            # left
-            for yslot in t.open_left:
-                y = base_y + yslot
-                x = base_x
-                half[y][x] = " "
-            # right
-            for yslot in t.open_right:
-                y = base_y + yslot
-                x = base_x + TILE_W - 1
-                half[y][x] = " "
-            # top
-            for xslot in t.open_top:
-                x = base_x + xslot
-                y = base_y
-                half[y][x] = " "
-            # bottom
-            for xslot in t.open_bot:
-                x = base_x + xslot
-                y = base_y + TILE_H - 1
-                half[y][x] = " "
-
-    return half
-
-
-def mirror_and_finalize(half: List[List[str]]) -> List[List[str]]:
-    w_half = MAP_W // 2
-    full = [[" " for _ in range(MAP_W)] for _ in range(MAP_H)]
-    for y in range(MAP_H):
-        for x in range(w_half):
-            ch = half[y][x]
-            full[y][x] = ch
-            full[y][MAP_W - 1 - x] = ch  # mirror
-
-    # Outer border walls (keep side tunnels clear at mid rows)
-    for x in range(MAP_W):
-        full[0][x] = "|"
-        full[MAP_H - 1][x] = "|"
-    for y in range(MAP_H):
-        full[y][0] = "|"
-        full[y][MAP_W - 1] = "|"
-
-    # Ghost box in center
-    box_w, box_h = 8, 4
-    bx0 = MAP_W // 2 - box_w // 2
-    by0 = MAP_H // 2 - box_h // 2
-    for yy in range(box_h):
-        for xx in range(box_w):
-            if yy in (0, box_h - 1) or xx in (0, box_w - 1):
-                full[by0 + yy][bx0 + xx] = "|"
+        def setDirFromEnum(dir_dict, de):
+            if de == DIR_UP:
+                dir_dict["x"], dir_dict["y"] = (0, -1)
+            elif de == DIR_RIGHT:
+                dir_dict["x"], dir_dict["y"] = (1, 0)
+            elif de == DIR_DOWN:
+                dir_dict["x"], dir_dict["y"] = (0, 1)
             else:
-                full[by0 + yy][bx0 + xx] = " "
-    # ghost door
-    full[by0 + box_h - 1][MAP_W // 2] = " "
+                dir_dict["x"], dir_dict["y"] = (-1, 0)
 
-    # Place pellets on floor cells (sparsify a bit)
-    for y in range(1, MAP_H - 1):
-        for x in range(1, MAP_W - 1):
-            if full[y][x] == " ":
-                # avoid placing inside ghost box edges
-                if by0 <= y < by0 + box_h and bx0 <= x < bx0 + box_w:
-                    continue
-                full[y][x] = "." if ((x + y) % 2 == 0) else " "
+        self.paths = []
+        visited: Dict[int, bool] = {}
 
-    # Power pellets near corners (find nearest floor points)
-    corners = [(1, 1), (1, MAP_H - 2), (MAP_W - 2, 1), (MAP_W - 2, MAP_H - 2)]
-    for cx, cy in corners:
-        for r in range(1, 8):
-            placed = False
-            for dx in range(-r, r + 1):
-                for dy in range(-r, r + 1):
-                    x, y = cx + dx, cy + dy
-                    if 1 <= x < MAP_W - 1 and 1 <= y < MAP_H - 1:
-                        if full[y][x] == ".":
-                            full[y][x] = "o"
-                            placed = True
-                            break
-                if placed:
+        def toIndex(x, y):
+            if -2 <= x < self.numCols + 2 and 0 <= y < self.numRows:
+                return (x + 2) + y * (self.numCols + 4)
+
+        edges: Dict[int, bool] = {}
+        i = 0
+        for y in range(self.numRows):
+            for x in range(-2, self.numCols + 2):
+                t = self.getTile(x, y)
+                if t == "|":
+                    neigh = [
+                        self.getTile(x - 1, y),
+                        self.getTile(x + 1, y),
+                        self.getTile(x, y - 1),
+                        self.getTile(x, y + 1),
+                        self.getTile(x - 1, y - 1),
+                        self.getTile(x - 1, y + 1),
+                        self.getTile(x + 1, y - 1),
+                        self.getTile(x + 1, y + 1),
+                    ]
+                    if any(nt != "|" for nt in neigh):
+                        edges[i] = True
+                i += 1
+
+        def getStartPoint(tx, ty, dirEnum, pad_state):
+            d = {"x": 0, "y": 0}
+            setDirFromEnum(d, dirEnum)
+            if toIndex(tx + d["y"], ty - d["x"]) not in edges:
+                pad_state["pad"] = 5 if self.isFloorTile(tx + d["y"], ty - d["x"]) else 0
+            px = -self.tileSize / 2 + pad_state["pad"]
+            py = self.tileSize / 2
+            a = dirEnum * math.pi / 2
+            c, s = math.cos(a), math.sin(a)
+            x = (px * c - py * s) + (tx + 0.5) * self.tileSize
+            y = (px * s + py * c) + (ty + 0.5) * self.tileSize
+            return {"x": x, "y": y}
+
+        def makePath(sx, sy):
+            d = {"x": 0, "y": 0}
+            if toIndex(sx + 1, sy) in edges:
+                dirEnum = DIR_RIGHT
+            elif toIndex(sx, sy + 1) in edges:
+                dirEnum = DIR_DOWN
+            else:
+                raise RuntimeError(f"1x1 tile at {sx},{sy}")
+            setDirFromEnum(d, dirEnum)
+            tx, ty = sx + d["x"], sy + d["y"]
+            init_tx, init_ty, init_de = tx, ty, dirEnum
+            path = []
+            pad_state = {"pad": 0}
+            turn = False
+            turnAround = False
+
+            while True:
+                visited[toIndex(tx, ty)] = True
+                pt = getStartPoint(tx, ty, dirEnum, pad_state)
+
+                if turn:
+                    last = path[-1]
+                    if d["x"] == 0:
+                        pt["cx"] = pt["x"]
+                        pt["cy"] = last["y"]
+                    else:
+                        pt["cx"] = last["x"]
+                        pt["cy"] = pt["y"]
+
+                turn = False
+                turnAround = False
+                if toIndex(tx + d["y"], ty - d["x"]) in edges:
+                    dirEnum = (dirEnum + 3) % 4
+                    turn = True
+                elif toIndex(tx + d["x"], ty + d["y"]) in edges:
+                    pass
+                elif toIndex(tx - d["y"], ty + d["x"]) in edges:
+                    dirEnum = (dirEnum + 1) % 4
+                    turn = True
+                else:
+                    dirEnum = (dirEnum + 2) % 4
+                    turnAround = True
+                setDirFromEnum(d, dirEnum)
+
+                path.append(pt)
+                if turnAround:
+                    back = getStartPoint(tx - d["x"], ty - d["y"], (dirEnum + 2) % 4, pad_state)
+                    path.append(back)
+                    again = getStartPoint(tx, ty, dirEnum, pad_state)
+                    path.append(again)
+
+                tx += d["x"]
+                ty += d["y"]
+                if tx == init_tx and ty == init_ty and dirEnum == init_de:
+                    self.paths.append(path)
                     break
-            if placed:
-                break
 
-    # Pac-Man start (left of ghost box)
-    full[MAP_H - 5][2] = "P"
-    return full
+        i = 0
+        for y in range(self.numRows):
+            for x in range(-2, self.numCols + 2):
+                idx = i
+                i += 1
+                if (idx in edges) and (idx not in visited):
+                    visited[idx] = True
+                    makePath(x, y)
+
+    def draw(self, out_path: str, print_mode: bool = False):
+        ts = self.tileSize
+        img = Image.new("RGB", (self.widthPixels, self.heightPixels), (0, 0, 0) if not print_mode else (255, 255, 255))
+        draw = ImageDraw.Draw(img, "RGBA")
+
+        # fill wall shapes (curved)
+        fill = self.wallFillColor if not print_mode else (51, 51, 51)
+        stroke = self.wallStrokeColor if not print_mode else (51, 51, 51)
+
+        for path in self.paths:
+            if not path:
+                continue
+            poly = []
+            for k in range(1, len(path)):
+                a = path[k - 1]
+                b = path[k]
+                if "cx" in b and "cy" in b:
+                    seg = qbezier((a["x"], a["y"]), (b["x"], b["y"]), (b["cx"], b["cy"]), steps=16)
+                    if poly:
+                        seg = seg[1:]
+                    poly.extend(seg)
+                else:
+                    poly.append((b["x"], b["y"]))
+            # close with a final quadratic to the start as in map.js
+            a = path[-1]
+            b = path[0]
+            seg = qbezier((a["x"], a["y"]), (b["x"], b["y"]), (a["x"], b["y"]), steps=16)
+            if poly:
+                seg = seg[1:]
+            poly.extend(seg)
+
+            draw.polygon(poly, fill=fill)
+            draw.line(poly + [poly[0]], fill=stroke, width=1)
+
+        # pellets
+        pellet = (187, 187, 187) if print_mode else self.pelletColor
+        pellet_size = ts if print_mode else 2
+        for y in range(self.numRows):
+            for x in range(self.numCols):
+                t = self.getTile(x, y)
+                if t in (".", "o", " "):
+                    cx = x * ts + ts / 2
+                    cy = y * ts + ts / 2
+                    r = 3 if (t == "o" and not print_mode) else pellet_size / 2
+                    draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=pellet)
+
+        # grid (subtle)
+        grid = (0, 0, 0, 77) if print_mode else (255, 255, 255, 77)
+        for y in range(self.numRows + 1):
+            draw.line([(0, y * ts), (self.widthPixels, y * ts)], fill=grid, width=1)
+        for x in range(self.numCols + 1):
+            draw.line([(x * ts, 0), (x * ts, self.heightPixels)], fill=grid, width=1)
+
+        img.save(out_path)
+        return img
 
 
-def generate_maze(seed: Optional[int] = None) -> List[List[str]]:
-    half = compose_left_half(seed)
-    return mirror_and_finalize(half)
+# -------------------------------
+# JS invocation util
+# -------------------------------
 
 
-# ---------------------- Rendering ----------------------
-def draw_one_maze(img: Image.Image, top_left: Tuple[int, int], maze: List[List[str]], wall_fill, wall_stroke):
-    draw = ImageDraw.Draw(img)
-    x0, y0 = top_left
-    # background panel
-    draw.rectangle([x0, y0, x0 + MAP_W * PX, y0 + MAP_H * PX], fill=(0, 0, 0))
+def generate_tiles_with_js(seed: Optional[int] = None) -> str:
+    if not shutil.which("node"):
+        print("ERROR: Node.js is required to run the embedded generator. Please install Node 16+.", file=sys.stderr)
+        sys.exit(1)
 
-    pellet_color = (255, 184, 174)
-
-    # draw walls as solid blocks
-    for y in range(MAP_H):
-        for x in range(MAP_W):
-            ch = maze[y][x]
-            px = x0 + x * PX
-            py = y0 + y * PX
-            if ch == "|":
-                draw.rectangle([px, py, px + PX - 1, py + PX - 1], fill=wall_fill, outline=wall_stroke, width=1)
-
-    # pellets
-    for y in range(MAP_H):
-        for x in range(MAP_W):
-            ch = maze[y][x]
-            if ch in (".", "o"):
-                px = x0 + x * PX + PX // 2
-                py = y0 + y * PX + PX // 2
-                r = 2 if ch == "." else 3
-                draw.ellipse([px - r, py - r, px + r, py + r], fill=pellet_color)
+    with tempfile.TemporaryDirectory() as td:
+        js_path = os.path.join(td, "gen.js")
+        with open(js_path, "w", encoding="utf-8") as f:
+            f.write(JS_ALGO)
+        env = os.environ.copy()
+        if seed is not None:
+            env["PACMAN_SEED"] = str(seed)
+        try:
+            out = subprocess.check_output(["node", js_path], env=env)
+        except subprocess.CalledProcessError as e:
+            print("JS generator failed:", e, file=sys.stderr)
+            sys.exit(1)
+    tiles = out.decode("utf-8")
+    return tiles
 
 
-def render_grid(n: int, cols: int, rows: int, seed: Optional[int], out_path: str = "mazes.png"):
-    rnd = random.Random(seed)
-    pad = PX * 2
-    w = cols * MAP_W * PX + (cols + 1) * pad
-    h = rows * MAP_H * PX + (rows + 1) * pad
-    img = Image.new("RGB", (w, h), (30, 30, 30))
+# -------------------------------
+# Collage
+# -------------------------------
 
-    for i in range(n):
-        r = i // cols
-        c = i % cols
-        if r >= rows:
-            break
-        mz = generate_maze(seed=rnd.randint(0, 10**9))
-        wall_fill, wall_stroke = random_wall_palette(rnd.randint(0, 10**9))
-        ox = pad + c * (MAP_W * PX + pad)
-        oy = pad + r * (MAP_H * PX + pad)
-        draw_one_maze(img, (ox, oy), mz, wall_fill, wall_stroke)
 
-    img.save(out_path)
-    return out_path
+def render_single(seed: Optional[int], tile_size: int, out_path: str):
+    tiles = generate_tiles_with_js(seed)
+    # The algorithm emits a 28×36 ASCII field (incl. padding rows)
+    COLS, ROWS = 28, 36
+    m = MapPy(
+        COLS,
+        ROWS,
+        tiles,
+        tileSize=tile_size,
+        wallFillColor=rgb("#00d0ff"),
+        wallStrokeColor=rgb("#8cf0ff"),
+        pelletColor=rgb("#ffb8ae"),
+    )
+    m.draw(out_path)
+    print(f"✅ Maze image saved to {out_path}")
+
+
+def render_grid(grid_spec: str, seed: Optional[int], tile_size: int, out_path: str):
+    cols, rows = map(int, grid_spec.lower().split("x"))
+    COLS, ROWS = 28, 36
+    cell_w, cell_h = COLS * tile_size, ROWS * tile_size
+    gap = tile_size  # spacing between mazes
+    W = cols * cell_w + (cols - 1) * gap
+    H = rows * cell_h + (rows - 1) * gap
+    canvas = Image.new("RGB", (W, H), (20, 20, 24))
+
+    rng = random.Random(seed)
+    for r in range(rows):
+        for c in range(cols):
+            s = rng.randrange(1 << 30) if seed is not None else None
+            tiles = generate_tiles_with_js(s)
+            # fun palette per cell
+            hue = rng.random()
+            wall = tuple(int(v) for v in (0, 180 + 60 * hue, 255 * hue + 80))
+            stroke = (255, 255, 255)
+            m = MapPy(
+                COLS,
+                ROWS,
+                tiles,
+                tileSize=tile_size,
+                wallFillColor=wall,
+                wallStrokeColor=stroke,
+                pelletColor=(255, 184, 174),
+            )
+            img = m.draw(out_path=None, print_mode=False)
+            x0 = c * (cell_w + gap)
+            y0 = r * (cell_h + gap)
+            canvas.paste(img, (x0, y0))
+
+    canvas.save(out_path)
+    print(f"✅ Grid saved to {out_path}")
+
+
+# -------------------------------
+# CLI
+# -------------------------------
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("-n", type=int, default=12, help="number of mazes")
-    ap.add_argument("--cols", type=int, default=4)
-    ap.add_argument("--rows", type=int, default=3)
-    ap.add_argument("--seed", type=int, default=None)
-    ap.add_argument("--out", default="mazes.png")
-    args = ap.parse_args()
-    path = render_grid(args.n, args.cols, args.rows, args.seed, args.out)
-    print(f"Saved {path}")
+    p = argparse.ArgumentParser(description="Pac-Man maze generator (Python renderer + JS algorithm)")
+    p.add_argument("--seed", type=int, help="deterministic seed for the maze")
+    p.add_argument("--tile", type=int, default=TILE_SIZE_DEFAULT, help="tile size in pixels (default 8)")
+    p.add_argument("--grid", type=str, help="e.g. 4x3 to render a collage instead of a single maze")
+    p.add_argument("--out", type=str, help="output filename (default: maze.png or grid.png)")
+    args = p.parse_args()
+
+    if args.grid:
+        out = args.out or "grid.png"
+        render_grid(args.grid, args.seed, args.tile, out)
+    else:
+        out = args.out or "maze.png"
+        render_single(args.seed, args.tile, out)
 
 
 if __name__ == "__main__":

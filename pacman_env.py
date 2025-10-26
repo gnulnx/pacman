@@ -209,6 +209,7 @@ class Config:
     pacman_color: Tuple[int, int, int] = (255, 255, 0)
     ghost_color: Tuple[int, int, int] = (255, 0, 0)
     random_seed: Optional[int] = None
+    max_steps: Optional[int] = 2000
 
     def __post_init__(self) -> None:
 
@@ -407,6 +408,8 @@ class PacmanEnv:
         self.surface: Optional[pygame.Surface]
         self.screen = self.surface = None
         self.clock = pygame.time.Clock()
+        self.max_steps = config.max_steps
+        self._step_counter = 0
         self._trajectory: List[Tuple[Dict[str, np.ndarray], Optional[int], float]] = []
         self._recording = False
         self._quit_requested = False
@@ -422,6 +425,7 @@ class PacmanEnv:
         self.maze.reset()
         self.pacman = Pacman(self.maze.pacman_spawn)
         self.ghosts = [Ghost(pos) for pos in self.ghost_spawn_points]
+        self._step_counter = 0
         state = self._get_state()
         if self._recording:
             self._trajectory.clear()
@@ -429,6 +433,9 @@ class PacmanEnv:
 
     def step(self, action: Optional[int]) -> Tuple[Dict[str, np.ndarray], float, bool, Dict[str, int]]:
         """Advance the environment by one tick."""
+        if self.max_steps is not None and self.max_steps <= 0:
+            raise ValueError("max_steps must be positive when provided.")
+
         if not self.human_mode:
             if action is None or action not in ACTIONS:
                 raise ValueError("Non-human mode requires an action from {0,1,2,3}.")
@@ -448,9 +455,17 @@ class PacmanEnv:
         done = collision or not self.maze.pellets.any()
         if collision:
             reward -= 1.0
+        self._step_counter += 1
+
+        max_steps_reached = False
+        if not done and self.max_steps is not None and self._step_counter >= self.max_steps:
+            done = True
+            max_steps_reached = True
 
         state = self._get_state()
         info = {"pellets_remaining": int(self.maze.pellets.sum())}
+        if max_steps_reached:
+            info["max_steps_reached"] = 1
         if self._recording:
             self._trajectory.append((state, action, reward))
         return state, reward, done, info

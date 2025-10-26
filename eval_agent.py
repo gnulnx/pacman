@@ -121,18 +121,7 @@ def evaluate(model_path, maze_spec, episodes=5, delay=0.25, randmon_pacman_start
 
 if __name__ == "__main__":
     # ✅ use your trained stage2 model
-    size = 4
-
-    # spec = MazeSpec(
-    #     width=4,
-    #     height=4,
-    #     include_ghosts=False,
-    #     pellet_mode="full",
-    #     pacman_start=(2, 1),
-    #     pellet_positions=[(0, 0)],
-    #     include_power_pellets=False,
-    #     surround_walls=True,
-    # )
+    size = 8
 
     start_x = random.randint(0, size - 1)
     start_y = random.randint(0, size - 1)
@@ -146,4 +135,7 @@ if __name__ == "__main__":
         # pellet_positions=[(0, 0)],
         surround_walls=True,
     )
-    evaluate("runs/stage38/final_model.pt", spec, randmon_pacman_start=True)
+    # This model is 4x4 long term mastery.
+    # evaluate("saved_models/4_x_4_mastered/final_model.pt", spec, randmon_pacman_start=True, episodes=20)
+    evaluate("runs/stage1/final_model.pt", spec, randmon_pacman_start=True, episodes=20)
+    # evaluate("saved_models/8_x_8_11262025/final_model.pt", spec, randmon_pacman_start=True, episodes=20)
