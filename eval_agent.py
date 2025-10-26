@@ -136,6 +136,6 @@ if __name__ == "__main__":
         surround_walls=True,
     )
     # This model is 4x4 long term mastery.
-    # evaluate("saved_models/4_x_4_mastered/final_model.pt", spec, randmon_pacman_start=True, episodes=20)
-    evaluate("runs/stage17/final_model.pt", spec, randmon_pacman_start=True, episodes=20)
+    evaluate("saved_models/4_x_4_mastered/final_model.pt", spec, randmon_pacman_start=True, episodes=20)
+    # evaluate("runs/stage33/final_model.pt", spec, randmon_pacman_start=True, episodes=20)
     # evaluate("saved_models/8_x_8_11262025/final_model.pt", spec, randmon_pacman_start=True, episodes=20)

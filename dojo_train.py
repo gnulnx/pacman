@@ -1,6 +1,9 @@
+import hashlib
+import json
 import os
 import random
 import time
+from collections import Counter, defaultdict
 from dataclasses import replace
 from typing import Callable, List, Optional
 
@@ -10,7 +13,27 @@ import torch
 from dojo_agent import Agent
 from pacman_env import ACTIONS, Config, MazeSpec, PacmanEnv
 
+# dojo_train.py
+
+
 TRAIN_MIN_EPISODES = 500
+
+
+def set_global_seed(seed=None):
+    """
+    Sets random seeds for reproducibility and logs the seed used.
+    If no seed is provided, generates one from current time.
+    """
+    if seed is None:
+        seed = int(time.time()) % (2**32 - 1)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    print(f"🧩 Using random seed: {seed}")
+    return seed
 
 
 def preprocess_state(state):
@@ -29,17 +52,21 @@ def preprocess_state(state):
 def train_stage(
     stage_name,
     maze_spec: MazeSpec,
-    episodes=2000,
+    episodes=10000,
     pretrained_path=None,
     spec_sampler: Optional[Callable[[], MazeSpec]] = None,
-    eps_start=0.5,
-    warmup_episodes=25,
-    lr_factor=0.25,
+    eps_start=0.8,
+    eps_decay=3000,
+    warmup_episodes=50,
+    lr_factor=1.0,
 ):
     """
-    Train a DQN agent on a given Pac-Man maze with adaptive epsilon decay,
-    early-stop criteria, and short warm-up. If a pretrained model is already
-    near-optimal, it skips retraining entirely.
+    Train a DQN agent on a given Pac-Man maze with robust convergence control.
+    This version:
+      - Uses high-variance reward scaling (0–100) to maintain gradient signal.
+      - Updates the target network slowly (every 200 episodes).
+      - Keeps strong exploration early to avoid collapse.
+      - Retains early-stop logic but with smoother tolerances.
     """
 
     def build_env(spec: MazeSpec) -> PacmanEnv:
@@ -52,43 +79,25 @@ def train_stage(
     obs_shape = sample_state.shape
     n_actions = len(ACTIONS)
 
-    eps_decay = max(int(episodes / 4), 1000)
+    eps_decay = max(int(episodes / 3), eps_decay)
+    print(f"training with eps_decay = {eps_decay}")
     agent = Agent(obs_shape, n_actions, eps_decay=eps_decay, eps_start=eps_start)
 
-    pellet_total = float(env.maze.pellets.sum())
+    # reward scaling parameters — high-variance restored
     alpha, c = 0.5, 100.0
-    max_possible = (pellet_total ** (1 - alpha)) * c  # expected max episodic return
 
-    # --- load pretrained model ---
+    # --- load pretrained model (if provided) ---
     if pretrained_path and os.path.exists(pretrained_path):
-        agent.model.load_state_dict(torch.load(pretrained_path, map_location="cpu"))
+        state_dict = torch.load(pretrained_path, map_location="cpu")
+        agent.model.load_state_dict(state_dict)
         agent.target.load_state_dict(agent.model.state_dict())
         print(f"✅ Loaded pretrained weights from {pretrained_path}")
         agent.optimizer = torch.optim.Adam(agent.model.parameters(), lr=agent.lr * lr_factor)
         agent.eps_start = eps_start
         agent.eps = eps_start
 
-        # --- quick evaluation of pretrained model ---
-        eval_env = build_env(maze_spec)
-        total_eval_reward = 0
-        for _ in range(5):
-            s = preprocess_state(eval_env.reset())
-            done = False
-            while not done:
-                a = agent.select_action(s, steps=99999)  # greedy eval
-                nxt, r, done, _ = eval_env.step(a)
-                s = preprocess_state(nxt)
-                total_eval_reward += (r / (pellet_total**alpha)) * c
-        eval_env.close()
-        avg_eval = total_eval_reward / 5.0
-        if avg_eval >= 0.9 * max_possible:
-            print(f"⚡ Pretrained model already near-optimal ({avg_eval:.1f}); skipping retrain.")
-            os.makedirs(f"runs/{stage_name}", exist_ok=True)
-            torch.save(agent.model.state_dict(), f"runs/{stage_name}/final_model.pt")
-            return
-
     agent.steps = 0
-    buffer_size = 10000 if current_spec.width <= 4 else 20000
+    buffer_size = 50000 if current_spec.width <= 4 else 100000
     agent.memory = agent.memory.__class__(maxlen=buffer_size)
 
     os.makedirs(f"runs/{stage_name}", exist_ok=True)
@@ -103,33 +112,34 @@ def train_stage(
     min_train_episodes = TRAIN_MIN_EPISODES
     state = sample_state
 
-    # --- training loop ---
     for ep in range(episodes):
-        done, total_reward, steps_in_ep = False, 0, 0
+        pellets_initial = int(env.maze.pellets.sum())
+        episode_scale = (max(1, pellets_initial) ** (1 - alpha)) * c
+        done, total_reward_scaled, steps_in_ep = False, 0.0, 0
         render_this_episode = ep % 100 == 0
         in_warmup = ep < warmup_episodes
 
         while not done:
             action = agent.select_action(state, steps=ep)
-            raw_next, reward, done, info = env.step(action)
+            raw_next, reward_raw, done, info = env.step(action)
 
-            # --- reward scaling ---
-            reward = float((reward / (pellet_total**alpha)) * c)
+            # keep reward variance high
+            reward_scaled = float((reward_raw / (max(1, pellets_initial) ** alpha)) * c)
 
             next_state = preprocess_state(raw_next)
-            agent.remember((state, action, reward, next_state, done))
+            agent.remember((state, action, reward_scaled, next_state, done))
             state = next_state
-            total_reward += reward
+            total_reward_scaled += reward_scaled
             steps_in_ep += 1
             total_steps += 1
 
-            if not in_warmup and total_steps % 10 == 0:
+            if not in_warmup and total_steps % 4 == 0:
                 agent.replay(batch_size=32)
             if render_this_episode:
                 env.render("human")
 
-        # --- metrics ---
-        recent_rewards.append(total_reward)
+        # episode summary
+        recent_rewards.append(total_reward_scaled)
         if len(recent_rewards) > 100:
             recent_rewards.pop(0)
 
@@ -141,19 +151,22 @@ def train_stage(
         avg = np.mean(recent_rewards)
         std = np.std(recent_rewards)
         rel_std = std / (abs(avg) + 1e-8)
-        progress = min(avg / max_possible, 1.0)
         success_rate = np.mean(recent_success) if recent_success else 0.0
+        progress = min(avg / episode_scale, 1.0)
 
-        if ep % 20 == 0 and not in_warmup:
+        # slower target updates — stability
+        if ep % 200 == 0 and not in_warmup:
             agent.update_target()
 
         if ep % 50 == 0:
             eps_val = agent.eps_end + (agent.eps_start - agent.eps_end) * np.exp(-1.0 * ep / agent.eps_decay)
             torch.save(agent.model.state_dict(), f"runs/{stage_name}/model.pt")
+            pellets_collected = (pellets_initial - pellets_remaining) / max(1, pellets_initial)
+
             print(
-                f"Episode {ep:4d} | reward={total_reward:6.2f} | avg={avg:6.2f} | std={std:5.2f} "
+                f"Episode {ep:4d} | reward={total_reward_scaled:6.2f} | avg={avg:6.2f} | std={std:5.2f} "
                 f"| rel_std={rel_std*100:4.2f}% | eps={eps_val:.3f} | progress={progress*100:5.1f}% "
-                f"| decay_rate={agent.eps_decay} | success_rate={success_rate*100:5.1f}%"
+                f"| success_rate={success_rate*100:5.1f}% | pellets={pellets_collected*100:5.1f}%"
                 + (" [WARM-UP]" if in_warmup else "")
             )
 
@@ -165,19 +178,19 @@ def train_stage(
             else:
                 no_improve_counter += 1
 
-            # --- early-stop criteria (restored) ---
+            # --- early stopping ---
             if not in_warmup and len(recent_rewards) == 100 and ep >= min_train_episodes:
-                if success_rate >= 0.98 and avg >= 0.98 * max_possible and std <= 0.02 * max_possible:
+                if success_rate >= 0.98 and rel_std <= 0.02:
                     print(f"✅ Early stopping: solved at ep {ep}")
                     torch.save(agent.model.state_dict(), f"runs/{stage_name}/final_model.pt")
                     env.close()
                     return
-                if success_rate >= 0.90 and std <= 0.05 * max_possible and no_improve_counter > 20:
+                if success_rate >= 0.90 and rel_std <= 0.05 and no_improve_counter > 20:
                     print(f"🟡 Plateau detected: stopping at ep {ep}")
                     torch.save(agent.model.state_dict(), f"runs/{stage_name}/final_model.pt")
                     env.close()
                     return
-                if avg_change < 0.005 and std <= 0.03 * max_possible:
+                if avg_change < 0.005 and rel_std <= 0.03:
                     print(f"🟢 Converged mean at ep {ep}")
                     torch.save(agent.model.state_dict(), f"runs/{stage_name}/final_model.pt")
                     env.close()
@@ -188,11 +201,9 @@ def train_stage(
             env.close()
             current_spec = spec_sampler()
             env = build_env(current_spec)
-            pellet_total = float(env.maze.pellets.sum())
-            max_possible = (pellet_total ** (1 - alpha)) * c
         state = preprocess_state(env.reset())
 
-        # --- occasional cache clear for MPS ---
+        # --- periodic MPS flush ---
         if torch.backends.mps.is_available() and time.time() - last_flush > 60:
             torch.mps.empty_cache()
             last_flush = time.time()
@@ -200,157 +211,6 @@ def train_stage(
     env.close()
     print(f"✅ Training complete for {stage_name}")
     torch.save(agent.model.state_dict(), f"runs/{stage_name}/final_model.pt")
-
-
-# def train_stage(
-#     stage_name,
-#     maze_spec: MazeSpec,
-#     episodes=10000,
-#     pretrained_path=None,
-#     spec_sampler: Optional[Callable[[], MazeSpec]] = None,
-#     eps_start=0.5,
-# ):
-#     """
-#     Train a DQN agent on a given Pac-Man maze with robust convergence detection.
-#     Automatically stops when performance stabilizes and approaches optimal reward.
-#     When `spec_sampler` is provided, a fresh MazeSpec is sampled every episode.
-#     """
-
-#     def build_env(spec: MazeSpec) -> PacmanEnv:
-#         return PacmanEnv(Config(maze_spec=spec), human_mode=False, headless=True)
-
-#     current_spec = spec_sampler() if spec_sampler is not None else maze_spec
-#     env = build_env(current_spec)
-#     sample_state = preprocess_state(env.reset())
-#     obs_shape = sample_state.shape
-#     n_actions = len(ACTIONS)
-#     agent = Agent(obs_shape, n_actions, eps_decay=10000, eps_start=eps_start)
-#     pellet_total = float(env.maze.pellets.sum())
-#     max_possible = 1.0  # rewards are normalised by pellet_total
-
-#     if pretrained_path and os.path.exists(pretrained_path):
-#         agent.model.load_state_dict(torch.load(pretrained_path, map_location="cpu"))
-#         agent.target.load_state_dict(agent.model.state_dict())
-#         print(f"✅ Loaded pretrained weights from {pretrained_path}")
-#         agent.optimizer = torch.optim.Adam(agent.model.parameters(), lr=agent.lr)
-#         agent.eps_start = 0.5
-#         agent.eps = agent.eps_start
-#     agent.steps = 0
-
-#     # buffer_size = 2000 if current_spec.width <= 4 else 5000
-#     buffer_size = 10000 if current_spec.width <= 4 else 20000
-#     agent.memory = agent.memory.__class__(maxlen=buffer_size)
-
-#     os.makedirs(f"runs/{stage_name}", exist_ok=True)
-#     print(f"🚀 Starting training for {stage_name} ({current_spec.width}x{current_spec.height})")
-
-#     recent_rewards = []
-#     recent_success = []
-#     best_mean = -float("inf")
-#     best_model_path = f"runs/{stage_name}/best_model.pt"
-#     no_improve_counter = 0
-#     total_steps = 0
-#     last_flush = time.time()
-
-#     min_train_episodes = TRAIN_MIN_EPISODES
-#     state = sample_state
-
-#     for ep in range(episodes):
-#         done = False
-#         total_reward = 0
-#         steps_in_ep = 0
-
-#         render_this_episode = ep % 100 == 0
-#         while not done:
-#             action = agent.select_action(state, steps=ep)
-#             raw_next, reward, done, info = env.step(action)
-
-#             # Normalize the rewards for different maze sizes and pellet counts
-#             reward = float(reward / pellet_total)
-
-#             next_state = preprocess_state(raw_next)
-
-#             agent.remember((state, action, reward, next_state, done))
-#             state = next_state
-#             total_reward += reward
-#             steps_in_ep += 1
-#             total_steps += 1
-
-#             if total_steps % 10 == 0:
-#                 agent.replay(batch_size=32)
-#             if render_this_episode:
-#                 env.render("human")
-
-#         recent_rewards.append(total_reward)
-#         if len(recent_rewards) > 100:
-#             recent_rewards.pop(0)
-
-#         pellets_remaining = info.get("pellets_remaining", 0)
-#         recent_success.append(1.0 if pellets_remaining == 0 else 0.0)
-#         if len(recent_success) > 200:
-#             recent_success.pop(0)
-
-#         avg = np.mean(recent_rewards)
-#         std = np.std(recent_rewards)
-#         rel_std = std / (abs(avg) + 1e-8)
-#         progress = min(avg / max_possible, 1.0)
-#         success_rate = np.mean(recent_success) if recent_success else 0.0
-
-#         if ep % 20 == 0:
-#             agent.update_target()
-
-#         if ep % 50 == 0:
-#             eps_val = agent.eps_end + (agent.eps_start - agent.eps_end) * np.exp(-1.0 * ep / agent.eps_decay)
-#             torch.save(agent.model.state_dict(), f"runs/{stage_name}/model.pt")
-#             print(
-#                 f"Episode {ep:4d} | reward={total_reward:6.2f} | avg={avg:6.2f} | std={std:5.2f} "
-#                 f"| rel_std={rel_std*100:4.2f}% | eps={eps_val:.3f} | progress={progress*100:5.1f}% | decay_rate={agent.eps_decay} | success_rate={success_rate*100:5.1f}%"
-#             )
-
-#             avg_change = abs(avg - best_mean)
-#             if avg > best_mean + 0.01:
-#                 best_mean = avg
-#                 torch.save(agent.model.state_dict(), best_model_path)
-#                 no_improve_counter = 0
-#             else:
-#                 no_improve_counter += 1
-
-#             if len(recent_rewards) == 100 and ep >= min_train_episodes:
-#                 if success_rate >= 0.98 and avg >= 0.98 * max_possible and std <= 0.02 * max_possible:
-#                     print(
-#                         f"✅ Early stopping: solved (success={success_rate*100:.1f}%, avg={avg:.2f}, std={std:.2f}) at ep {ep}"
-#                     )
-#                     torch.save(agent.model.state_dict(), f"runs/{stage_name}/final_model.pt")
-#                     env.close()
-#                     return
-#                 if success_rate >= 0.90 and std <= 0.05 * max_possible and no_improve_counter > 20:
-#                     print(
-#                         f"🟡 Plateau detected: stopping (success={success_rate*100:.1f}%, avg={avg:.2f}, Δavg={avg_change:.3f})"
-#                     )
-#                     torch.save(agent.model.state_dict(), f"runs/{stage_name}/final_model.pt")
-#                     env.close()
-#                     return
-#                 if avg_change < 0.005 and std <= 0.03 * max_possible:
-#                     print(f"🟢 Converged mean: avg={avg:.2f}, Δavg={avg_change:.3f}, std={std:.2f} at ep {ep}")
-#                     torch.save(agent.model.state_dict(), f"runs/{stage_name}/final_model.pt")
-#                     env.close()
-#                     return
-
-#         if spec_sampler is not None:
-#             env.close()
-#             current_spec = spec_sampler()
-#             env = build_env(current_spec)
-#             pellet_total = float(env.maze.pellets.sum())
-#             max_possible = 1.0
-#         state = preprocess_state(env.reset())
-
-#         if torch.backends.mps.is_available() and time.time() - last_flush > 60:
-#             torch.mps.empty_cache()
-#             last_flush = time.time()
-
-#     env.close()
-#     print(f"✅ Training complete for {stage_name}")
-#     torch.save(agent.model.state_dict(), f"runs/{stage_name}/final_model.pt")
 
 
 def _single_pellet_position(width: int, height: int, start: tuple[int, int]) -> tuple[int, int]:
@@ -427,69 +287,135 @@ def _random_episode_sampler(
     return sampler
 
 
-# def _random_episode_sampler(
-#     base_spec: MazeSpec,
-#     *,
-#     randomize_pacman: bool,
-#     randomize_single_target: bool,
-#     max_target_count: int = 32,
-# ) -> Callable[[], MazeSpec]:
-#     """Return a sampler that emits fresh MazeSpecs with randomized start/pellet layouts.
+def hash_layout(spec: MazeSpec) -> str:
+    # Compactly represent the maze layout (ignore pellet order)
+    pellets_sorted = sorted(spec.pellet_positions or [])
+    key = json.dumps((spec.pacman_start, pellets_sorted))
+    return hashlib.md5(key.encode()).hexdigest()
 
-#     The sampler clones the base specification each time, optionally randomizes Pac-Man's
-#     starting tile, and chooses between 1 and `max_target_count` unique pellet positions.
-#     For single-pellet curricula this allows rehearsal with varying pellet counts.
-#     """
 
-#     coords = [(x, y) for x in range(base_spec.width) for y in range(base_spec.height)]
+def build_balanced_sampler(
+    base_spec, randomize_pacman=True, randomize_single_target=True, max_target_count=32, pre_samples=50000
+):
+    # Step 1: Generate a large random set
+    raw_sampler = _random_episode_sampler(
+        base_spec,
+        randomize_pacman=randomize_pacman,
+        randomize_single_target=randomize_single_target,
+        max_target_count=max_target_count,
+    )
 
-#     def choose_unique_positions(exclude: set[tuple[int, int]], count: int) -> List[tuple[int, int]]:
-#         """Helper that samples up to `count` unique coordinates avoiding `exclude`."""
-#         available = [pos for pos in coords if pos not in exclude]
-#         if not available:
-#             return []
-#         count = min(count, len(available))
-#         return random.sample(available, count)
+    counts = Counter()
+    cached = []
+    for _ in range(pre_samples):
+        s = raw_sampler()
+        h = hash_layout(s)
+        counts[h] += 1
+        cached.append((h, s))
 
-#     def sampler() -> MazeSpec:
-#         # --- Pac-Man start ---
-#         pacman_start = base_spec.pacman_start
-#         if randomize_pacman:
-#             pacman_start = random.choice(coords)
+    # Step 2: Compute inverse frequency weights
+    total = sum(counts.values())
+    weights = {h: (total / counts[h]) for h in counts}
 
-#         # --- Pellet selection ---
-#         pellets: List[tuple[int, int]]
-#         if randomize_single_target or not base_spec.pellet_positions:
-#             # Randomize pellet count between 1 and max_target_count (inclusive).
-#             target_count = max(1, max_target_count)
-#             pellet_count = random.randint(1, target_count)
-#             pellets = choose_unique_positions({pacman_start}, pellet_count)
-#         else:
-#             # Start from provided pellets; ensure uniqueness and avoid the start tile.
-#             pellets = [pos for pos in base_spec.pellet_positions if pos != pacman_start]
-#             seen = set(pellets)
-#             target_count = max(1, max_target_count)
-#             while len(pellets) < target_count:
-#                 extra = choose_unique_positions(seen | {pacman_start}, 1)
-#                 if not extra:
-#                     break
-#                 pellets.extend(extra)
-#                 seen.update(extra)
+    # Step 3: Build weighted sampling array
+    population = [s for (h, s) in cached]
+    probs = [weights[h] for (h, s) in cached]
+    total_w = sum(probs)
+    probs = [p / total_w for p in probs]
 
-#         spec = replace(
-#             base_spec,
-#             pacman_start=pacman_start,
-#             pellet_positions=pellets,
-#             random_seed=random.randint(0, 10**9),
-#         )
-#         # Debug print statement for visibility; comment out if too noisy.
-#         print(f"   → episode layout: start={spec.pacman_start}, pellets={spec.pellet_positions}")
-#         return spec
+    def sampler():
+        # pick one biased toward rarer configurations
+        return random.choices(population, weights=probs, k=1)[0]
 
-#     return sampler
+    print(f"Balanced sampler built with {len(counts)} unique layouts across {pre_samples} samples.")
+    return sampler
+
+
+def build_stratified_sampler(
+    base_spec: MazeSpec,
+    *,
+    randomize_pacman: bool = True,
+    randomize_single_target: bool = True,
+    max_target_count: int = 16,
+    pre_samples: int = 5000,
+    distance_bins: Optional[List[int]] = None,
+) -> Callable[[], MazeSpec]:
+    """
+    Create a callable sampler that balances maze layouts by 'difficulty' strata:
+      - Distance from Pac-Man start to nearest pellet
+      - Number of pellets
+
+    It first generates many random layouts (like a dry run), buckets them into
+    distance ranges, and samples evenly from each bucket.
+
+    Args:
+        base_spec: Base MazeSpec to clone from
+        randomize_pacman: Randomize Pac-Man start positions
+        randomize_single_target: Randomize pellet positions when in 'single' mode
+        max_target_count: Max pellets to sample for multi-target episodes
+        pre_samples: Number of random layouts to precompute
+        distance_bins: Custom distance breakpoints; defaults to quartiles
+    """
+    coords = [(x, y) for x in range(base_spec.width) for y in range(base_spec.height)]
+
+    def choose_unique_positions(exclude: set[tuple[int, int]], count: int) -> List[tuple[int, int]]:
+        available = [pos for pos in coords if pos not in exclude]
+        if not available:
+            return []
+        count = min(count, len(available))
+        return random.sample(available, count)
+
+    # --- Phase 1: generate random layouts ---
+    samples = []
+    for _ in range(pre_samples):
+        pacman_start = random.choice(coords) if randomize_pacman else base_spec.pacman_start
+        if randomize_single_target:
+            pellet_count = random.randint(1, max_target_count)
+            pellets = choose_unique_positions({pacman_start}, pellet_count)
+        else:
+            pellets = base_spec.pellet_positions or choose_unique_positions({pacman_start}, 1)
+
+        # Compute minimum Manhattan distance to any pellet
+        px, py = pacman_start
+        dist = min(abs(px - x) + abs(py - y) for (x, y) in pellets)
+        samples.append((dist, pacman_start, pellets))
+
+    # --- Phase 2: define difficulty bins ---
+    dists = [s[0] for s in samples]
+    max_d = max(dists)
+    if distance_bins is None:
+        # Default: quartile-like cutoffs
+        distance_bins = [1, max(2, max_d // 3), max(3, 2 * max_d // 3), max_d + 1]
+    bins = defaultdict(list)
+    for dist, start, pellets in samples:
+        for i, cutoff in enumerate(distance_bins):
+            if dist <= cutoff:
+                bins[i].append((dist, start, pellets))
+                break
+
+    print(f"Stratified sampler built with {len(samples)} layouts, {len(bins)} distance strata.")
+
+    # --- Phase 3: uniform bucket sampler ---
+    def sampler() -> MazeSpec:
+        if not bins:
+            raise RuntimeError("No buckets built for stratified sampler")
+        bucket_id = random.choice(list(bins.keys()))
+        dist, pac_start, pellets = random.choice(bins[bucket_id])
+        spec = replace(
+            base_spec,
+            pacman_start=pac_start,
+            pellet_positions=pellets,
+            random_seed=random.randint(0, 10**9),
+        )
+        return spec
+
+    return sampler
 
 
 if __name__ == "__main__":
+
+    seed = set_global_seed()  # call this FIRST
+    input("Press Enter to begin training...")
 
     stage = 1
     prev_final = None
@@ -498,99 +424,109 @@ if __name__ == "__main__":
     two_by_two_coords = [(x, y) for x in range(2) for y in range(2)]
 
     # Single-pellet cases
-    for start_x, start_y in two_by_two_coords:
-        for pellet_x, pellet_y in two_by_two_coords:
-            if (start_x, start_y) == (pellet_x, pellet_y):
-                continue
-            stage_name = f"stage{stage}"
-            maze_spec = MazeSpec(
-                width=2,
-                height=2,
-                include_ghosts=False,
-                pellet_mode="single",
-                pacman_start=(start_x, start_y),
-                pellet_positions=[(pellet_x, pellet_y)],
-                include_power_pellets=False,
-                surround_walls=True,
-            )
-            print(
-                f"\n=== Training {stage_name} [2x2 | single] "
-                f"(start={start_x},{start_y} → pellet={pellet_x},{pellet_y}) ==="
-            )
-            train_stage(stage_name, maze_spec, pretrained_path=prev_final)
-            prev_final = f"runs/{stage_name}/final_model.pt"
-            stage += 1
+    # for start_x, start_y in two_by_two_coords:
+    #     for pellet_x, pellet_y in two_by_two_coords:
+    #         if (start_x, start_y) == (pellet_x, pellet_y):
+    #             continue
+    #         stage_name = f"stage{stage}"
+    #         maze_spec = MazeSpec(
+    #             width=2,
+    #             height=2,
+    #             include_ghosts=False,
+    #             pellet_mode="single",
+    #             pacman_start=(start_x, start_y),
+    #             pellet_positions=[(pellet_x, pellet_y)],
+    #             include_power_pellets=False,
+    #             surround_walls=True,
+    #         )
+    #         print(
+    #             f"\n=== Training {stage_name} [2x2 | single] "
+    #             f"(start={start_x},{start_y} → pellet={pellet_x},{pellet_y}) ==="
+    #         )
+    #         train_stage(stage_name, maze_spec, pretrained_path=prev_final)
+    #         prev_final = f"runs/{stage_name}/final_model.pt"
+    #         stage += 1
 
-    # Full-pellet cases
-    for start_x, start_y in two_by_two_coords:
-        stage_name = f"stage{stage}"
-        maze_spec = MazeSpec(
-            width=2,
-            height=2,
-            include_ghosts=False,
-            pellet_mode="full",
-            pacman_start=(start_x, start_y),
-            include_power_pellets=False,
-            surround_walls=True,
-        )
-        print(f"\n=== Training {stage_name} [2x2 | full] (start={start_x},{start_y}) ===")
-        train_stage(stage_name, maze_spec, pretrained_path=prev_final)
-        prev_final = f"runs/{stage_name}/final_model.pt"
-        stage += 1
+    # # Full-pellet cases
+    # for start_x, start_y in two_by_two_coords:
+    #     stage_name = f"stage{stage}"
+    #     maze_spec = MazeSpec(
+    #         width=2,
+    #         height=2,
+    #         include_ghosts=False,
+    #         pellet_mode="full",
+    #         pacman_start=(start_x, start_y),
+    #         include_power_pellets=False,
+    #         surround_walls=True,
+    #     )
+    #     print(f"\n=== Training {stage_name} [2x2 | full] (start={start_x},{start_y}) ===")
+    #     train_stage(stage_name, maze_spec, pretrained_path=prev_final)
+    #     prev_final = f"runs/{stage_name}/final_model.pt"
+    #     stage += 1
 
-    # --- 4x4 curriculum: structured starts ---
-    coords_4 = [(x, y) for x in range(4) for y in range(4)]
-    full_subset_4 = random.sample(coords_4, min(16, len(coords_4)))
-    for start_x, start_y in full_subset_4:
-        stage_name = f"stage{stage}"
-        maze_spec = MazeSpec(
-            width=4,
-            height=4,
-            include_ghosts=False,
-            pellet_mode="full",
-            pacman_start=(start_x, start_y),
-            include_power_pellets=False,
-            surround_walls=True,
-        )
-        print(f"\n=== Training {stage_name} [4x4 | full] (start={start_x},{start_y}) ===")
-        train_stage(stage_name, maze_spec, pretrained_path=prev_final)
-        prev_final = f"runs/{stage_name}/final_model.pt"
-        stage += 1
-
-    # --- 4x4 random rehearsal ---
+    # # --- 4x4 curriculum: structured starts ---
     # stage = 17
     # stage_name = f"stage{stage}"
     # prev_final = "runs/stage16/final_model.pt"
-    review_full_spec_4 = MazeSpec(
-        width=4,
-        height=4,
-        include_ghosts=False,
-        pellet_mode="full",
-        pacman_start=(0, 0),
-        include_power_pellets=False,
-        surround_walls=True,
-    )
-    full_sampler_4 = _random_episode_sampler(review_full_spec_4, randomize_pacman=True, randomize_single_target=False)
-    stage_name = f"stage{stage}"
-    print(f"\n=== Training {stage_name} [4x4 | full | random episodes] ===")
-    train_stage(stage_name, review_full_spec_4, pretrained_path=prev_final, spec_sampler=full_sampler_4)
-    prev_final = f"runs/{stage_name}/final_model.pt"
-    stage += 1
+    # coords_4 = [(x, y) for x in range(4) for y in range(4)]
+    # full_subset_4 = random.sample(coords_4, min(16, len(coords_4)))
+    # for start_x, start_y in full_subset_4:
+    #     stage_name = f"stage{stage}"
+    #     maze_spec = MazeSpec(
+    #         width=4,
+    #         height=4,
+    #         include_ghosts=False,
+    #         pellet_mode="full",
+    #         pacman_start=(start_x, start_y),
+    #         include_power_pellets=False,
+    #         surround_walls=True,
+    #     )
+    #     print(f"\n=== Training {stage_name} [4x4 | full] (start={start_x},{start_y}) ===")
+    #     train_stage(stage_name, maze_spec, pretrained_path=prev_final)
+    #     prev_final = f"runs/{stage_name}/final_model.pt"
+    #     stage += 1
+
+    # # --- 4x4 random rehearsal ---
+    # review_full_spec_4 = MazeSpec(
+    #     width=4,
+    #     height=4,
+    #     include_ghosts=False,
+    #     pellet_mode="full",
+    #     # pacman_start=(0, 0),
+    #     include_power_pellets=False,
+    #     surround_walls=True,
+    # )
+    # full_sampler_4 = _random_episode_sampler(review_full_spec_4, randomize_pacman=True, randomize_single_target=False)
+    # stage_name = f"stage{stage}"
+    # print(f"\n=== Training {stage_name} [4x4 | full | random episodes] ===")
+    # train_stage(stage_name, review_full_spec_4, pretrained_path=prev_final, spec_sampler=full_sampler_4)
+    # prev_final = f"runs/{stage_name}/final_model.pt"
+    # stage += 1
 
     # --- 4x4 random rehearsal ---
+    stage = 33
+    stage_name = f"stage{stage}"
+    prev_final = "runs/stage32/final_model.pt"
     review_full_spec_4 = MazeSpec(
         width=4,
         height=4,
         include_ghosts=False,
         pellet_mode="single",
-        # pacman_start=(0, 0),
         include_power_pellets=False,
         surround_walls=True,
     )
-    full_sampler_4 = _random_episode_sampler(
+    full_sampler_4 = build_stratified_sampler(
         review_full_spec_4, randomize_pacman=True, randomize_single_target=False, max_target_count=16
     )
-    train_stage(stage_name, review_full_spec_4, pretrained_path=prev_final, spec_sampler=full_sampler_4)
+    train_stage(
+        stage_name,
+        review_full_spec_4,
+        pretrained_path=prev_final,
+        spec_sampler=full_sampler_4,
+        eps_decay=5000,  # slower decay for more exploration
+        episodes=20000,  # more episodes for mastery
+    )
+    print(f"\n=== Training {stage_name} [4x4 | single | random episodes] ===")
     prev_final = f"runs/{stage_name}/final_model.pt"
     stage += 1
 
