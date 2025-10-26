@@ -51,6 +51,10 @@ def train_stage(
     obs_shape = sample_state.shape
     n_actions = len(ACTIONS)
     agent = Agent(obs_shape, n_actions)
+    epsilon_floor = agent.eps_end
+    eps_decay = agent.eps_decay
+    current_epsilon = agent.epsilon
+    decay_factor = float(np.exp(-1.0 / eps_decay))
 
     pellet_total = float(env.maze.pellets.sum())
     max_possible = _estimate_max_reward(env, alpha, c)
@@ -61,8 +65,12 @@ def train_stage(
         agent.target.load_state_dict(agent.model.state_dict())
         print(f"✅ Loaded pretrained weights from {pretrained_path}")
         agent.optimizer = torch.optim.Adam(agent.model.parameters(), lr=agent.lr * 0.25)
-        agent.eps_start, agent.eps_end, agent.eps_decay = 0.15, 0.05, 300
-        agent.eps = agent.eps_start
+        current_epsilon = 0.15
+        epsilon_floor = 0.05
+        eps_decay = 300
+        decay_factor = float(np.exp(-1.0 / eps_decay))
+        agent.set_epsilon(current_epsilon)
+        agent.eps_end = epsilon_floor
 
         # --- quick evaluation to skip retrain ---
         eval_env = PacmanEnv(Config(maze_spec=maze_spec), human_mode=False, headless=True)
@@ -71,7 +79,7 @@ def train_stage(
             s = preprocess_state(eval_env.reset())
             done = False
             while not done:
-                a = agent.select_action(s, steps=99999)  # greedy
+                a = agent.select_action(s, epsilon=0.0)  # greedy
                 nxt, r, done, _ = eval_env.step(a)
                 total_eval += (r / (pellet_total**alpha)) * c
                 s = preprocess_state(nxt)
@@ -83,7 +91,6 @@ def train_stage(
             torch.save(agent.model.state_dict(), f"runs/{stage_name}/final_model.pt")
             return
 
-    agent.steps = 0
     buffer_size = 2000 if current_spec.width <= 4 else 5000
     agent.memory = agent.memory.__class__(maxlen=buffer_size)
 
@@ -101,13 +108,15 @@ def train_stage(
     state = sample_state
 
     for ep in range(episodes):
+        epsilon_for_episode = current_epsilon
+        agent.set_epsilon(epsilon_for_episode)
         done = False
         total_reward = 0
         steps_in_ep = 0
         render_this_episode = ep % 100 == 0
 
         while not done:
-            action = agent.select_action(state)
+            action = agent.select_action(state, epsilon=epsilon_for_episode)
             raw_next, reward, done, info = env.step(action)
             reward = float((reward / (pellet_total**alpha)) * c)  # scaled reward
             next_state = preprocess_state(raw_next)
@@ -143,7 +152,7 @@ def train_stage(
             agent.update_target()
 
         if ep % 50 == 0:
-            eps_val = agent.eps_end + (agent.eps_start - agent.eps_end) * np.exp(-1.0 * agent.steps / agent.eps_decay)
+            eps_val = epsilon_for_episode
             torch.save(agent.model.state_dict(), f"runs/{stage_name}/model.pt")
             print(
                 f"Episode {ep:4d} | reward={total_reward:6.2f} | avg={avg:6.2f} | std={std:5.2f} "
@@ -179,6 +188,12 @@ def train_stage(
                     torch.save(agent.model.state_dict(), f"runs/{stage_name}/final_model.pt")
                     env.close()
                     return
+
+        current_epsilon = max(
+            epsilon_floor,
+            epsilon_floor + (current_epsilon - epsilon_floor) * decay_factor,
+        )
+        agent.set_epsilon(current_epsilon)
 
         # --- resample maze if requested ---
         if spec_sampler is not None:

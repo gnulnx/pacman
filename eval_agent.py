@@ -126,16 +126,24 @@ if __name__ == "__main__":
     start_x = random.randint(0, size - 1)
     start_y = random.randint(0, size - 1)
 
+    pellet_x = random.randint(0, size - 1)
+    pellet_y = random.randint(0, size - 1)
+
+    if pellet_x == start_x and pellet_y == start_y:
+        pellet_x = (pellet_x + 1) % size
+        pellet_y = (pellet_y + 1) % size
+
     spec = MazeSpec(
         width=size,
         height=size,
         pacman_start=(start_x, start_y),
         include_ghosts=False,
-        pellet_mode="full",
-        # pellet_positions=[(0, 0)],
+        pellet_mode="single",
+        pellet_positions=[(pellet_x, pellet_y)],
         surround_walls=True,
     )
     # This model is 4x4 long term mastery.
-    evaluate("saved_models/4_x_4_mastered/final_model.pt", spec, randmon_pacman_start=True, episodes=20)
+    # evaluate("saved_models/4_x_4_mastered/final_model.pt", spec, randmon_pacman_start=True, episodes=20)
     # evaluate("runs/stage33/final_model.pt", spec, randmon_pacman_start=True, episodes=20)
     # evaluate("saved_models/8_x_8_11262025/final_model.pt", spec, randmon_pacman_start=True, episodes=20)
+    evaluate("runs/stage255/final_model.pt", spec, randmon_pacman_start=True, episodes=20)
