@@ -97,7 +97,7 @@ def evaluate(model_path, maze_spec, episodes=5, delay=0.25, randmon_pacman_start
 
             # Reinit layout and env with new pacman start
             layout = tuple(generate_rect_layout(maze_spec))
-            cfg = Config(maze_layout=layout)  # <- NOT maze_spec
+            cfg = Config(maze_layout=layout, max_steps=200)  # <- NOT maze_spec
             env = PacmanEnv(cfg, human_mode=False, headless=False)
 
             env.reset()
@@ -121,7 +121,7 @@ def evaluate(model_path, maze_spec, episodes=5, delay=0.25, randmon_pacman_start
 
 if __name__ == "__main__":
     # ✅ use your trained stage2 model
-    size = 4
+    size = 8
 
     # spec = MazeSpec(
     #     width=4,
@@ -146,4 +146,4 @@ if __name__ == "__main__":
         # pellet_positions=[(0, 0)],
         surround_walls=True,
     )
-    evaluate("runs/stage38/final_model.pt", spec, randmon_pacman_start=True)
+    evaluate("runs/stage28/final_model.pt", spec, randmon_pacman_start=True, episodes=10)
