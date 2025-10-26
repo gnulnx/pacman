@@ -209,6 +209,7 @@ class Config:
     pacman_color: Tuple[int, int, int] = (255, 255, 0)
     ghost_color: Tuple[int, int, int] = (255, 0, 0)
     random_seed: Optional[int] = None
+    max_steps: Optional[int] = None
 
     def __post_init__(self) -> None:
 
@@ -403,6 +404,8 @@ class PacmanEnv:
         self.pacman = Pacman(self.maze.pacman_spawn)
         self.ghost_spawn_points = list(self.maze.ghost_spawns)
         self.ghosts = [Ghost(pos) for pos in self.ghost_spawn_points]
+        self.max_steps = config.max_steps
+        self._step_counter = 0
         self.screen: Optional[pygame.Surface]
         self.surface: Optional[pygame.Surface]
         self.screen = self.surface = None
@@ -422,6 +425,7 @@ class PacmanEnv:
         self.maze.reset()
         self.pacman = Pacman(self.maze.pacman_spawn)
         self.ghosts = [Ghost(pos) for pos in self.ghost_spawn_points]
+        self._step_counter = 0
         state = self._get_state()
         if self._recording:
             self._trajectory.clear()
@@ -445,12 +449,20 @@ class PacmanEnv:
                 ghost.step(self.maze)
             collision = self._check_collision()
 
+        self._step_counter += 1
         done = collision or not self.maze.pellets.any()
+        max_steps_reached = False
+        if not done and self.max_steps is not None and self._step_counter >= self.max_steps:
+            done = True
+            max_steps_reached = True
+
         if collision:
             reward -= 1.0
 
         state = self._get_state()
         info = {"pellets_remaining": int(self.maze.pellets.sum())}
+        if max_steps_reached:
+            info["max_steps_reached"] = 1
         if self._recording:
             self._trajectory.append((state, action, reward))
         return state, reward, done, info
