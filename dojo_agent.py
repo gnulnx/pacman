@@ -58,15 +58,33 @@ class Agent:
         self.n_actions = n_actions
         self.lr = lr
 
-    def select_action(self, state):
-        eps = self.eps_end + (self.eps_start - self.eps_end) * np.exp(-1.0 * self.steps / self.eps_decay)
-        self.steps += 1
+    def select_action(self, state, steps: int | None = None):
+        if steps is not None:
+            eps = self.eps_end + (self.eps_start - self.eps_end) * np.exp(-1.0 * steps / self.eps_decay)
+        else:
+            eps = self.eps_end + (self.eps_start - self.eps_end) * np.exp(-1.0 * self.steps / self.eps_decay)
+            self.steps += 1  # only advance the internal counter when we're using it
+
         if random.random() < eps:
             return random.randrange(self.n_actions)
+
         with torch.no_grad():
-            state = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
-            qvals = self.model(state)
+            state_t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+            qvals = self.model(state_t)
             return int(torch.argmax(qvals).item())
+
+    # def select_action(self, state, steps=None):
+    #     if steps:
+    #         eps = self.eps_end + (self.eps_start - self.eps_end) * np.exp(-1.0 * steps / self.eps_decay)
+    #     else:
+    #         eps = self.eps_end + (self.eps_start - self.eps_end) * np.exp(-1.0 * self.steps / self.eps_decay)
+    #     self.steps += 1
+    #     if random.random() < eps:
+    #         return random.randrange(self.n_actions)
+    #     with torch.no_grad():
+    #         state = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+    #         qvals = self.model(state)
+    #         return int(torch.argmax(qvals).item())
 
     def remember(self, transition):
         self.memory.append(transition)

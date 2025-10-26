@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -207,9 +208,13 @@ class Config:
     wall_color: Tuple[int, int, int] = (0, 51, 153)
     pellet_color: Tuple[int, int, int] = (255, 204, 0)
     pacman_color: Tuple[int, int, int] = (255, 255, 0)
+    power_pellet_color: Tuple[int, int, int] = (255, 255, 255)
     ghost_color: Tuple[int, int, int] = (255, 0, 0)
     random_seed: Optional[int] = None
     max_steps: Optional[int] = 2000
+    animation_duration_ms: int = 140  # duration of one tile move when animating in human mode
+    power_pellet_speed_multiplier: float = 2
+    power_pellet_duration_steps: int = 60
 
     def __post_init__(self) -> None:
 
@@ -245,12 +250,15 @@ class Maze:
         )
         pacman_spawn: Optional[GridPos] = None
         ghost_spawns: List[GridPos] = []
+        power_pellets: set[GridPos] = set()
         for y, row in enumerate(self._layout):
             for x, ch in enumerate(row):
                 if ch == "P":
                     pacman_spawn = (x, y)
                 elif ch == "G":
                     ghost_spawns.append((x, y))
+                elif ch == "o":
+                    power_pellets.add((x, y))
         if pacman_spawn is None:
             for y, row in enumerate(self._layout):
                 for x, ch in enumerate(row):
@@ -263,6 +271,7 @@ class Maze:
                 raise ValueError("Maze missing Pac-Man spawn and contains no walkable tiles.")
         self.pacman_spawn = pacman_spawn
         self.ghost_spawns = ghost_spawns
+        self.power_pellet_positions = power_pellets
         self._validate_layout()
         # Preserve the post-validation pellet mask so reset() restores the exact layout
         self._initial_pellets = self.pellets.copy()
@@ -316,6 +325,8 @@ class Maze:
                     self.pellets[y, x] = 0
                     if self._layout[y][x] == ".":
                         self._layout[y][x] = " "
+                    if (x, y) in self.power_pellet_positions:
+                        self.power_pellet_positions.discard((x, y))
 
         repaired_ghosts: List[GridPos] = []
         for pos in self.ghost_spawns:
@@ -410,6 +421,11 @@ class PacmanEnv:
         self.clock = pygame.time.Clock()
         self.max_steps = config.max_steps
         self._step_counter = 0
+        self._interp_start_pos: GridPos = self.pacman.position
+        self._interp_target_pos: GridPos = self.pacman.position
+        self._interp_start_time: float = time.perf_counter()
+        self._speed_multiplier = 1.0
+        self._speed_timer = 0
         self._trajectory: List[Tuple[Dict[str, np.ndarray], Optional[int], float]] = []
         self._recording = False
         self._quit_requested = False
@@ -426,6 +442,9 @@ class PacmanEnv:
         self.pacman = Pacman(self.maze.pacman_spawn)
         self.ghosts = [Ghost(pos) for pos in self.ghost_spawn_points]
         self._step_counter = 0
+        self._begin_pacman_interp(self.pacman.position, self.pacman.position)
+        self._speed_multiplier = 1.0
+        self._speed_timer = 0
         state = self._get_state()
         if self._recording:
             self._trajectory.clear()
@@ -441,10 +460,23 @@ class PacmanEnv:
                 raise ValueError("Non-human mode requires an action from {0,1,2,3}.")
             self.pacman.set_direction(ACTIONS[action], self.maze)
 
-        self.pacman.step(self.maze)
-        reward = -0.01
-        if self.maze.consume_pellet(self.pacman.position):
-            reward += 1.0
+        prev_pos = self.pacman.position
+        steps_this_tick = max(1, int(round(self._speed_multiplier)))
+        reward = 0.0
+        for _ in range(steps_this_tick):
+            reward -= 0.01
+            prev_pos = self.pacman.position
+            self.pacman.step(self.maze)
+            self._begin_pacman_interp(prev_pos, self.pacman.position)
+            if self.pacman.position == prev_pos:
+                break
+
+            if self.maze.consume_pellet(self.pacman.position):
+                reward += 1.0
+                if self.pacman.position in self.maze.power_pellet_positions:
+                    self.maze.power_pellet_positions.discard(self.pacman.position)
+                    self._speed_multiplier = self.config.power_pellet_speed_multiplier
+                    self._speed_timer = self.config.power_pellet_duration_steps
 
         collision = self._check_collision()
         if not collision:
@@ -456,6 +488,11 @@ class PacmanEnv:
         if collision:
             reward -= 1.0
         self._step_counter += 1
+
+        if self._speed_timer > 0:
+            self._speed_timer -= 1
+            if self._speed_timer == 0:
+                self._speed_multiplier = 1.0
 
         max_steps_reached = False
         if not done and self.max_steps is not None and self._step_counter >= self.max_steps:
@@ -536,6 +573,27 @@ class PacmanEnv:
         pellets = self.maze.pellets.copy()
         return {"pacman": pacman_pos, "ghosts": ghost_positions, "pellets": pellets}
 
+    def _begin_pacman_interp(self, start: GridPos, target: GridPos) -> None:
+        """Prepare interpolation data for smooth rendering between grid tiles."""
+        self._interp_start_pos = start
+        self._interp_target_pos = target
+        self._interp_start_time = time.perf_counter()
+
+    def _interpolated_pacman_position(self) -> Tuple[float, float]:
+        """Return Pac-Man's interpolated position for animation."""
+        start = self._interp_start_pos
+        target = self._interp_target_pos
+        if start == target:
+            return float(target[0]), float(target[1])
+        elapsed = time.perf_counter() - self._interp_start_time
+        duration = max(1e-6, (self.config.animation_duration_ms / 1000.0) / max(1.0, self._speed_multiplier))
+        t = min(1.0, elapsed / duration)
+        x = start[0] + (target[0] - start[0]) * t
+        y = start[1] + (target[1] - start[1]) * t
+        if t >= 1.0:
+            self._interp_start_pos = target
+        return x, y
+
     def _draw_maze(self, surface: pygame.Surface) -> None:
         """Render walls and pellets."""
         tile = self.config.tile_size
@@ -546,12 +604,22 @@ class PacmanEnv:
                     pygame.draw.rect(surface, self.config.wall_color, rect)
                 elif self.maze.pellets[y, x]:
                     center = (x * tile + tile // 2, y * tile + tile // 2)
-                    pygame.draw.circle(surface, self.config.pellet_color, center, tile // 6)
+                    radius = tile // 4 if (x, y) in self.maze.power_pellet_positions else tile // 6
+                    color = (
+                        self.config.power_pellet_color
+                        if (x, y) in self.maze.power_pellet_positions
+                        else self.config.pellet_color
+                    )
+                    pygame.draw.circle(surface, color, center, radius)
 
     def _draw_pacman(self, surface: pygame.Surface) -> None:
         """Render Pac-Man."""
         tile = self.config.tile_size
-        center = (self.pacman.position[0] * tile + tile // 2, self.pacman.position[1] * tile + tile // 2)
+        if self.human_mode and not self.headless:
+            x, y = self._interpolated_pacman_position()
+        else:
+            x, y = self.pacman.position
+        center = (int(x * tile + tile // 2), int(y * tile + tile // 2))
         pygame.draw.circle(surface, self.config.pacman_color, center, tile // 2 - 2)
 
     def _draw_ghosts(self, surface: pygame.Surface) -> None:
@@ -565,36 +633,33 @@ class PacmanEnv:
 class Game:
     """Thin wrapper to run the Pac-Man environment in human-controlled mode."""
 
-    def __init__(self, config: Optional[Config] = None) -> None:
-        """Create a playable game instance with the provided configuration."""
+    def __init__(
+        self,
+        config: Optional[Config] = None,
+        *,
+        maze_spec: Optional[MazeSpec] = None,
+        maze_layout: Optional[Sequence[str]] = None,
+    ) -> None:
+        """Create a playable game instance using the same configuration shapes as training.
 
-        # Example of a custom maze spec that you would use for simple RL training
-        spec_stage1 = MazeSpec(
-            width=2,
-            height=2,
-            include_ghosts=False,
-            pellet_mode="single",
-            pellet_positions=[(1, 1)],
-            include_power_pellets=False,
-            surround_walls=True,
-        )
-        self.env = PacmanEnv(Config(maze_spec=spec_stage1), human_mode=True, headless=False)
+        Priority:
+            1. If `config` is provided, it is used directly.
+            2. Otherwise, build a Config from `maze_layout` when supplied.
+            3. Otherwise, build a Config from `maze_spec` when supplied.
+            4. Fall back to a default connected maze (maze_size=12).
+        """
 
-        # Example show how we can setup an exact matrix
-        # maze = (
-        #     "################",
-        #     "#P..#......#..G#",
-        #     "#.#.#.####.#.###",  # +#
-        #     "#.#.#....#.#..##",  # +#
-        #     "#.#.####.#.##.##",  # +#
-        #     "#.#......#....##",  # +#
-        #     "################",
-        # )
-        # self.env = PacmanEnv(Config(maze_layout=maze), human_mode=True)
+        if config is not None:
+            self.config = config
+        elif maze_layout is not None:
+            self.config = Config(maze_layout=tuple(maze_layout))
+        elif maze_spec is not None:
+            self.config = Config(maze_spec=maze_spec)
+        else:
+            self.config = Config(maze_size=12)
 
-        # This runs in default game mode
-        self.config = config or Config(maze_size=12)
         self.env = PacmanEnv(self.config, human_mode=True)
+        self._held_direction: Optional[Direction] = None
 
     def run(self) -> None:
         """Start the interactive game loop."""
@@ -607,7 +672,16 @@ class Game:
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.KEYDOWN:
-                    self._handle_key(event.key)
+                    direction = self._map_key(event.key)
+                    if direction is not None:
+                        self._held_direction = direction
+                        self.env.set_human_direction(direction)
+                elif event.type == pygame.KEYUP:
+                    direction = self._map_key(event.key)
+                    if direction is not None and self._held_direction == direction:
+                        self._held_direction = None
+            if self._held_direction is not None:
+                self.env.set_human_direction(self._held_direction)
             state, reward, done, _ = self.env.step(action=None)
             self.env.render(mode="human")
             if done:
@@ -615,7 +689,8 @@ class Game:
                 self.env.reset()
         self.env.close()
 
-    def _handle_key(self, key: int) -> None:
+    @staticmethod
+    def _map_key(key: int) -> Optional[Direction]:
         """Translate keyboard input into Pac-Man movement commands."""
         mapping = {
             pygame.K_UP: ACTIONS[0],
@@ -623,9 +698,22 @@ class Game:
             pygame.K_LEFT: ACTIONS[2],
             pygame.K_RIGHT: ACTIONS[3],
         }
-        if key in mapping:
-            self.env.set_human_direction(mapping[key])
+        return mapping.get(key)
 
 
 if __name__ == "__main__":
-    Game().run()
+    size = 12
+    start_x = random.randint(0, size - 1)
+    start_y = random.randint(0, size - 1)
+    spec = MazeSpec(
+        width=size,
+        height=size,
+        pacman_start=(start_x, start_y),
+        include_ghosts=False,
+        pellet_mode="full",
+        # pellet_positions=[(0, 0)],
+        surround_walls=True,
+        # power_pellet_positions=[(size - 1, size - 1)],
+        include_power_pellets=True,
+    )
+    Game(maze_spec=spec).run()

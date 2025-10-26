@@ -121,7 +121,7 @@ def evaluate(model_path, maze_spec, episodes=5, delay=0.25, randmon_pacman_start
 
 if __name__ == "__main__":
     # ✅ use your trained stage2 model
-    size = 8
+    size = 4
 
     start_x = random.randint(0, size - 1)
     start_y = random.randint(0, size - 1)
@@ -137,5 +137,5 @@ if __name__ == "__main__":
     )
     # This model is 4x4 long term mastery.
     # evaluate("saved_models/4_x_4_mastered/final_model.pt", spec, randmon_pacman_start=True, episodes=20)
-    evaluate("runs/stage1/final_model.pt", spec, randmon_pacman_start=True, episodes=20)
+    evaluate("runs/stage17/final_model.pt", spec, randmon_pacman_start=True, episodes=20)
     # evaluate("saved_models/8_x_8_11262025/final_model.pt", spec, randmon_pacman_start=True, episodes=20)
