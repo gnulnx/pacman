@@ -4,6 +4,7 @@ import os  # noqa
 import pickle  # noqa
 import random  # noqa
 import shutil  # noqa
+import sys  # noqa
 import time  # noqa
 from dataclasses import replace  # noqa
 
@@ -237,6 +238,8 @@ def evaluate(
 
         # --- Rebuild env for this episode ---
         layout = tuple(generate_rect_layout(ep_spec))
+        if output:
+            print("\n".join(layout))
         cfg = Config(maze_layout=layout, max_steps=200, fps=fps)
         env.close()
         env = PacmanEnv(cfg, human_mode=False, headless=not show_pacman)
@@ -254,6 +257,7 @@ def evaluate(
                 s = torch.tensor(state, dtype=torch.float32, device=agent.device).unsqueeze(0)
                 action = int(torch.argmax(agent.model(s)).item())
             next_state, reward, done, _ = env.step(action)
+            # print(f"reward={reward} done={done}")
             state = preprocess_state(next_state)
             if show_pacman:
                 env.render("human")
@@ -283,7 +287,7 @@ def evaluate(
 if __name__ == "__main__":
     # Base directory containing all your stage runs
     run_dir = "runs"
-    run_name = "stage2"
+    run_name = "stage33"
 
     stage_path = os.path.join(run_dir, run_name)
     model_path = os.path.join(stage_path, "final_model.pt")
@@ -295,11 +299,7 @@ if __name__ == "__main__":
     spec: MazeSpec = cfg["maze_spec"]
     # print("Loaded config:", cfg)
     print(f"🧠 Loaded {run_name} ({spec.width}x{spec.height}) with {spec.pellet_mode} mode")
-    # layout = tuple(generate_rect_layout(spec))
-    # cfg = Config(maze_layout=layout, max_steps=200)
-    # env = PacmanEnv(cfg, human_mode=True, headless=False)
 
-    # input("test")
     num_pellets = random.randint(1, (spec.width * spec.height) - 1)
     print("Number of random pellets for evaluation:", num_pellets)
 
@@ -311,12 +311,13 @@ if __name__ == "__main__":
         num_random_pellets=num_pellets,  # ✅ Vary pellet count
         show_pacman=True,
         episodes=10,
+        output=False,
         delay=0,
         fps=1000,
     )
     print(f"Final evaluation score: {results:.2f}")
 
-    input("run done")
+    sys.exit(0)
 
     # # Optional: loop through all stages later
     # evaluated_dir = "evaluated_models"
@@ -338,7 +339,8 @@ if __name__ == "__main__":
     #     )
 
     # best_by_size = {}  # size_key -> {"score": tuple, "run_name": str, "stage_path": str}
-
+    print("Evaluating all runs in:", run_dir)
+    print("-----------------------------------")
     for run_name in sorted(os.listdir(run_dir)):
         stage_path = os.path.join(run_dir, run_name)
         cfg_path = os.path.join(stage_path, "config.pkl")
@@ -349,34 +351,37 @@ if __name__ == "__main__":
             print(f"⚠️  Skipping {run_name}, no config.pkl found.")
             continue
 
-        print("stage_path:", stage_path)
+        # print("stage_path:", stage_path)
         # Read the config file
         with open(cfg_path, "rb") as f:
             cfg = pickle.load(f)
 
-        print(cfg)
+        # print(cfg)
         spec: generate_rect_layout = cfg["maze_spec"]
 
         config_class = f"{spec.width}x{spec.height}"
         config_name = f"{run_name}_{config_class}_{spec.pellet_mode}"
-        print(f"🧠 Loaded {config_name} in class {config_class}")
-
+        # print(f"🧠 Loaded {config_name} in class {config_class}")
+        # print("MazeSpec:", spec)
+        spec = MazeSpec(
+            width=spec.width,
+            height=spec.height,
+            include_ghosts=spec.include_ghosts,
+            # ghost_positions=spec.ghost_positions,
+            pellet_positions=spec.pellet_positions,
+            pellet_mode=spec.pellet_mode,
+            include_power_pellets=False,
+            surround_walls=True,
+        )
+        # print("MazeSpec:", spec)
+        # input()
         score = evaluate(
             model_path,
-            MazeSpec(
-                width=spec.width,
-                height=spec.height,
-                include_ghosts=spec.include_ghosts,
-                # ghost_positions=spec.ghost_positions,
-                pellet_mode=spec.pellet_mode,
-                pellet_positions=spec.pellet_positions,
-                include_power_pellets=spec.include_power_pellets,
-                surround_walls=spec.surround_walls,
-            ),
+            spec,
             random_pacman_start=True,
-            show_pacman=True,
+            show_pacman=False,
             episodes=10,
-            # delay=0,
+            delay=0,
             fps=1000,
             output=False,
         )

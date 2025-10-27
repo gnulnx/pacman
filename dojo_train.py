@@ -33,6 +33,40 @@ def _estimate_max_reward(env: PacmanEnv) -> float:
     return max(1, pellet_count) * 1.0
 
 
+def save_state(
+    state_dict,
+    stage_name,
+    current_spec,
+    pretrained_path,
+    episodes,
+    max_possible,
+    success_rate,
+    avg,
+    std,
+    model_name="final_model.pt",
+):
+    """
+    Save the model state and training configuration to disk.
+    """
+    os.makedirs(f"runs/{stage_name}", exist_ok=True)
+    torch.save(state_dict, f"runs/{stage_name}/{model_name}")
+    #  Also save input params as a pickle for easy loading later
+    with open(f"runs/{stage_name}/config.pkl", "wb") as f:
+        pickle.dump(
+            {
+                "maze_spec": current_spec,
+                "stage_name": stage_name,
+                "pretrained_path": pretrained_path,
+                "episodes": episodes,
+                "max_possible": max_possible,
+                "success_rate": success_rate,
+                "avg_reward": avg,
+                "std_reward": std,
+            },
+            f,
+        )
+
+
 def train_stage(
     stage_name,
     maze_spec: MazeSpec,
@@ -85,7 +119,6 @@ def train_stage(
     recent_rewards = []
     recent_success = []
     best_mean = -float("inf")
-    best_model_path = f"runs/{stage_name}/best_model.pt"
     no_improve_counter = 0
     total_steps = 0
     last_flush = time.time()
@@ -146,7 +179,18 @@ def train_stage(
         # --- Logging + checkpoint ---
         if ep % 50 == 0:
             eps_val = eps_end + (eps_start - eps_end) * np.exp(-1.0 * total_steps / eps_decay)
-            torch.save(agent.model.state_dict(), f"runs/{stage_name}/model.pt")
+            save_state(
+                agent.model.state_dict(),
+                stage_name,
+                current_spec,
+                pretrained_path,
+                episodes,
+                max_possible,
+                success_rate,
+                avg,
+                std,
+                model_name="model.pt",
+            )
             print(
                 f"Episode {ep:4d} | reward={total_reward:6.2f} | avg={avg:6.2f} | std={std:5.2f} "
                 f"| rel_std={rel_std*100:4.2f}% | eps={eps_val:.3f} | progress={progress*100:5.1f}%"
@@ -156,7 +200,18 @@ def train_stage(
             avg_change = abs(avg - best_mean)
             if avg > best_mean + 0.01:
                 best_mean = avg
-                torch.save(agent.model.state_dict(), best_model_path)
+                save_state(
+                    agent.model.state_dict(),
+                    stage_name,
+                    current_spec,
+                    pretrained_path,
+                    episodes,
+                    max_possible,
+                    success_rate,
+                    avg,
+                    std,
+                    model_name="best_model.pt",
+                )
                 no_improve_counter = 0
             else:
                 no_improve_counter += 1
@@ -168,7 +223,19 @@ def train_stage(
                 #     print(
                 #         f"✅ Early stopping: solved (success={success_rate*100:.1f}%, avg={avg:.2f}, std={std:.2f}) at ep {ep}"
                 #     )
-                #     torch.save(agent.model.state_dict(), f"runs/{stage_name}/final_model.pt")
+                #     save_state(
+                #         agent.model.state_dict(),
+                #         stage_name,
+                #         current_spec,
+                #         pretrained_path,
+                #         episodes,
+                #         max_possible,
+                #         success_rate,
+                #         avg,
+                #         std,
+                #         model_name="final_model.pt",
+                #     )
+
                 #     env.close()
                 #     return
 
@@ -177,30 +244,37 @@ def train_stage(
                     print(
                         f"🟡 Plateau detected: stopping (success={success_rate*100:.1f}%, avg={avg:.2f}, Δavg={avg_change:.3f})"
                     )
-                    torch.save(agent.model.state_dict(), f"runs/{stage_name}/final_model.pt")
+                    save_state(
+                        agent.model.state_dict(),
+                        stage_name,
+                        current_spec,
+                        pretrained_path,
+                        episodes,
+                        max_possible,
+                        success_rate,
+                        avg,
+                        std,
+                        model_name="final_model.pt",
+                    )
+
                     env.close()
                     return
 
                 # 3️⃣ Converged mean: flat trend with low variability
                 if avg_change < 0.005 and std <= 0.03 * max_possible:
                     print(f"🟢 Converged mean: avg={avg:.2f}, Δavg={avg_change:.3f}, std={std:.2f} at ep {ep}")
-                    torch.save(agent.model.state_dict(), f"runs/{stage_name}/final_model.pt")
-
-                    # Also save input params as a pickle for easy loading later
-                    with open(f"runs/{stage_name}/config.pkl", "wb") as f:
-                        pickle.dump(
-                            {
-                                "maze_spec": current_spec,
-                                "stage_name": stage_name,
-                                "pretrained_path": pretrained_path,
-                                "episodes": episodes,
-                                "max_possible": max_possible,
-                                "success_rate": success_rate,
-                                "avg_reward": avg,
-                                "std_reward": std,
-                            },
-                            f,
-                        )
+                    save_state(
+                        agent.model.state_dict(),
+                        stage_name,
+                        current_spec,
+                        pretrained_path,
+                        episodes,
+                        max_possible,
+                        success_rate,
+                        avg,
+                        std,
+                        model_name="final_model.pt",
+                    )
 
                     env.close()
                     return
@@ -226,22 +300,18 @@ def train_stage(
     # --- Training complete fallback ---
     env.close()
     print(f"✅ Training complete for {stage_name}")
-    torch.save(agent.model.state_dict(), f"runs/{stage_name}/final_model.pt")
-    # Also save input params as a pickle for easy loading later
-    with open(f"runs/{stage_name}/config.pkl", "wb") as f:
-        pickle.dump(
-            {
-                "maze_spec": current_spec,
-                "stage_name": stage_name,
-                "pretrained_path": pretrained_path,
-                "episodes": episodes,
-                "max_possible": max_possible,
-                "success_rate": success_rate,
-                "avg_reward": avg,
-                "std_reward": std,
-            },
-            f,
-        )
+    save_state(
+        agent.model.state_dict(),
+        stage_name,
+        current_spec,
+        pretrained_path,
+        episodes,
+        max_possible,
+        success_rate,
+        avg,
+        std,
+        model_name="final_model.pt",
+    )
 
 
 def _single_pellet_position(width: int, height: int, start: tuple[int, int]) -> tuple[int, int]:
