@@ -33,14 +33,19 @@ class DQN(nn.Module):
 
 
 class Agent:
-    def __init__(self, obs_shape, n_actions, lr=1e-3, gamma=0.99, eps_start=1.0, eps_end=0.1, eps_decay=10000):
+    def __init__(
+        self, obs_shape, n_actions, lr=1e-3, gamma=0.99, eps_start=1.0, eps_end=0.1, eps_decay=10000, device=None
+    ):
         # ✅ auto-detect best device
-        if torch.backends.mps.is_available():
-            self.device = "mps"
-        elif torch.cuda.is_available():
-            self.device = "cuda"
+        if not device:
+            if torch.backends.mps.is_available():
+                self.device = "mps"
+            elif torch.cuda.is_available():
+                self.device = "cuda"
+            else:
+                self.device = "cpu"
         else:
-            self.device = "cpu"
+            self.device = device
         print("Using", self.device)
 
         input_channels = obs_shape[0]  # first dimension = number of channels (3)
