@@ -24,11 +24,6 @@ def preprocess_state(state):
     return stacked
 
 
-from dojo_train import (
-    preprocess_state,  # if preprocess_state is in same file, remove this import
-)
-
-
 def _estimate_max_reward(env: PacmanEnv) -> float:
     """Approximate best-case episodic reward given the current layout."""
     pellet_count = int(env.maze.pellets.sum())
@@ -155,13 +150,13 @@ def train_stage(
             # --- Early stopping logic ---
             if len(recent_rewards) == 100 and ep >= min_train_episodes:
                 # 1️⃣ Solved: clears maze reliably with stable high reward
-                if success_rate >= 0.98 and avg >= 0.98 * max_possible and std <= 0.02 * max_possible:
-                    print(
-                        f"✅ Early stopping: solved (success={success_rate*100:.1f}%, avg={avg:.2f}, std={std:.2f}) at ep {ep}"
-                    )
-                    torch.save(agent.model.state_dict(), f"runs/{stage_name}/final_model.pt")
-                    env.close()
-                    return
+                # if success_rate >= 0.98 and avg >= 0.98 * max_possible and std <= 0.02 * max_possible:
+                #     print(
+                #         f"✅ Early stopping: solved (success={success_rate*100:.1f}%, avg={avg:.2f}, std={std:.2f}) at ep {ep}"
+                #     )
+                #     torch.save(agent.model.state_dict(), f"runs/{stage_name}/final_model.pt")
+                #     env.close()
+                #     return
 
                 # 2️⃣ Plateaued: high performance but no improvement for a while
                 if success_rate >= 0.90 and std <= 0.05 * max_possible and no_improve_counter > 20:
