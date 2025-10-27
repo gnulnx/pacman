@@ -58,7 +58,7 @@ from pacman_env import ACTIONS, Config, MazeSpec, PacmanEnv, generate_rect_layou
 #     env.close()
 
 
-def evaluate(model_path, maze_spec, episodes=5, delay=0.25, randmon_pacman_start=False):
+def evaluate(model_path, maze_spec, episodes=5, delay=0.25, fps=100, randmon_pacman_start=False, show_pacman=False):
     # 1) Freeze the layout explicitly from the spec
     layout = tuple(generate_rect_layout(maze_spec))
 
@@ -89,6 +89,8 @@ def evaluate(model_path, maze_spec, episodes=5, delay=0.25, randmon_pacman_start
     agent.model.to(device)
 
     print(f"🎯 Evaluating {model_path} on {maze_spec.width}x{maze_spec.height} maze...")
+    total_reward = 0.0
+    total_steps = 0
     for ep in range(episodes):
         if randmon_pacman_start:
             start_x = random.randint(0, spec.width - 1)
@@ -97,25 +99,36 @@ def evaluate(model_path, maze_spec, episodes=5, delay=0.25, randmon_pacman_start
 
             # Reinit layout and env with new pacman start
             layout = tuple(generate_rect_layout(maze_spec))
-            cfg = Config(maze_layout=layout, max_steps=200)  # <- NOT maze_spec
+            cfg = Config(maze_layout=layout, max_steps=200, fps=fps)
             env = PacmanEnv(cfg, human_mode=False, headless=False)
 
             env.reset()
 
         state = preprocess_state(env.reset())
         done = False
-        total_reward = 0.0
+        total_episode_reward = 0.0
+        total_episode_steps = 0
         while not done:
             with torch.no_grad():
                 s = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
                 action = int(torch.argmax(agent.model(s)).item())
             next_state, reward, done, _ = env.step(action)
             state = preprocess_state(next_state)
-            env.render("human")
-            total_reward += reward
+            if show_pacman:
+                env.render("human")
+            total_episode_reward += reward
+            total_episode_steps += 1
+
             time.sleep(delay)
-        print(f"Episode {ep}: total_reward={total_reward:.2f}")
+        total_reward += total_episode_reward
+        total_steps += total_episode_steps
+        print(f"Episode {ep}: total_reward={total_episode_reward:.2f} in {total_episode_steps} steps")
         time.sleep(0.5)
+
+    avg_reward = total_reward / episodes
+    avg_steps = total_steps / episodes
+    print(f"=== Average Reward over {episodes} episodes: {avg_reward:.2f} ===")
+    print(f"=== Average Steps over {episodes} episodes: {avg_steps:.2f} ===")
     env.close()
 
 
@@ -146,4 +159,13 @@ if __name__ == "__main__":
         # pellet_positions=[(0, 0)],
         surround_walls=True,
     )
-    evaluate("runs/stage28/final_model.pt", spec, randmon_pacman_start=True, episodes=10)
+    # 28 works decently well
+    evaluate(
+        "runs/stage48/final_model.pt",
+        spec,
+        randmon_pacman_start=True,
+        show_pacman=True,
+        episodes=100,
+        delay=0,
+        fps=1000,
+    )
