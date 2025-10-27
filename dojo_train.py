@@ -12,6 +12,7 @@ from pacman_env import ACTIONS, Config, MazeSpec, PacmanEnv
 
 
 def preprocess_state(state):
+    """Convert raw environment state dict to stacked numpy array for DQN input."""
     pellets = state["pellets"].astype(np.float32)
     pac = np.zeros_like(pellets)
     px, py = state["pacman"]
