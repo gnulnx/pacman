@@ -51,7 +51,12 @@ def train_stage(
 
     # --- Environment setup ---
     current_spec = spec_sampler() if spec_sampler is not None else maze_spec
-    env = PacmanEnv(Config(maze_spec=current_spec), human_mode=False, headless=True)
+    max_steps = current_spec.width * current_spec.height * 10  # simple heuristic
+    env = PacmanEnv(
+        Config(maze_spec=current_spec, max_steps=max_steps, fps=2000),
+        human_mode=False,
+        headless=True,
+    )
     sample_state = preprocess_state(env.reset())
     obs_shape = sample_state.shape
     n_actions = len(ACTIONS)
@@ -204,7 +209,12 @@ def train_stage(
         if spec_sampler is not None:
             env.close()
             current_spec = spec_sampler()
-            env = PacmanEnv(Config(maze_spec=current_spec), human_mode=False, headless=True)
+            max_steps = current_spec.width * current_spec.height * 10  # simple heuristic
+            env = PacmanEnv(
+                Config(maze_spec=current_spec, max_steps=max_steps, fps=2000),
+                human_mode=False,
+                headless=True,
+            )
             max_possible = _estimate_max_reward(env)
         state = preprocess_state(env.reset())
 
