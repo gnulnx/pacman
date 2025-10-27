@@ -86,14 +86,21 @@ def train_stage(
     min_train_episodes = max(500, current_spec.width * current_spec.height * 50)
     state = sample_state
 
+    # Setup training hyperparameters
+    eps_start = 1.0
+    eps_end = 0.1
+    eps_decay = 10000
+    epsilon = eps_start
+
     for ep in range(episodes):
+        epsilon = eps_end + (eps_start - eps_end) * np.exp(-1.0 * total_steps / eps_decay)
         done = False
         total_reward = 0
         steps_in_ep = 0
 
         render_this_episode = ep % 100 == 0
         while not done:
-            action = agent.select_action(state)
+            action = agent.select_action(state, epsilon)
             raw_next, reward, done, info = env.step(action)
             next_state = preprocess_state(raw_next)
 
@@ -132,7 +139,7 @@ def train_stage(
 
         # --- Logging + checkpoint ---
         if ep % 50 == 0:
-            eps_val = agent.eps_end + (agent.eps_start - agent.eps_end) * np.exp(-1.0 * agent.steps / agent.eps_decay)
+            eps_val = eps_end + (eps_start - eps_end) * np.exp(-1.0 * total_steps / eps_decay)
             torch.save(agent.model.state_dict(), f"runs/{stage_name}/model.pt")
             print(
                 f"Episode {ep:4d} | reward={total_reward:6.2f} | avg={avg:6.2f} | std={std:5.2f} "

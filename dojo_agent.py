@@ -34,7 +34,6 @@ class DQN(nn.Module):
 
 class Agent:
     def __init__(self, obs_shape, n_actions, lr=1e-3, gamma=0.99, eps_start=1.0, eps_end=0.1, eps_decay=10000):
-        # self.device = "cuda" if torch.cuda.is_available() else "cpu"
         # ✅ auto-detect best device
         if torch.backends.mps.is_available():
             self.device = "mps"
@@ -51,17 +50,11 @@ class Agent:
         self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
         self.gamma = gamma
         self.memory = deque(maxlen=10000)
-        self.steps = 0
-        self.eps_start = eps_start
-        self.eps_end = eps_end
-        self.eps_decay = eps_decay
         self.n_actions = n_actions
         self.lr = lr
 
-    def select_action(self, state):
-        eps = self.eps_end + (self.eps_start - self.eps_end) * np.exp(-1.0 * self.steps / self.eps_decay)
-        self.steps += 1
-        if random.random() < eps:
+    def select_action(self, state, epsilon: float) -> int:
+        if random.random() < epsilon:
             return random.randrange(self.n_actions)
         with torch.no_grad():
             state = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
