@@ -198,7 +198,7 @@ def generate_connected_layout(size: int, seed: Optional[int] = None) -> List[str
 class Config:
     """Shared configuration for the Pac-Man environment and game."""
 
-    tile_size: int = 24
+    tile_size: int = 48
     maze_size: int = 17
     maze_layout: Optional[Sequence[str]] = None
     maze_spec: Optional[MazeSpec] = None
