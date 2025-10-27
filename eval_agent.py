@@ -205,10 +205,12 @@ def evaluate(
     agent.model.load_state_dict(torch.load(model_path, map_location="cpu"))
     agent.model.eval()
 
+    print("pellet count: ", env.maze.pellets.sum())
+
     if output:
         print(f"🎯 Evaluating {model_path} on {base_spec.width}x{base_spec.height} maze...")
 
-    total_reward, total_steps = 0.0, 0
+    total_reward, total_steps, total_pellets_left = 0.0, 0, 0
 
     for ep in range(episodes):
         # --- Derive episode-specific spec ---
@@ -219,8 +221,8 @@ def evaluate(
             start_x = random.randint(0, ep_spec.width - 1)
             start_y = random.randint(0, ep_spec.height - 1)
             ep_spec = replace(ep_spec, pacman_start=(start_x, start_y))
-            if output:
-                print(f"  🎲 Pac-Man start: {(start_x, start_y)}")
+            # if output:
+            #     print(f"  🎲 Pac-Man start: {(start_x, start_y)}")
 
         # (2) Randomize pellets if requested
         if randomize_pellets:
@@ -233,13 +235,13 @@ def evaluate(
                 if pos != ep_spec.pacman_start and pos not in pellets:
                     pellets.append(pos)
             ep_spec = replace(ep_spec, pellet_mode="custom", pellet_positions=pellets)
-            if output:
-                print(f"  🍒 Randomized {len(pellets)} pellet(s): {pellets}")
+            # if output:
+            #     print(f"  🍒 Randomized {len(pellets)} pellet(s): {pellets}")
 
         # --- Rebuild env for this episode ---
         layout = tuple(generate_rect_layout(ep_spec))
-        if output:
-            print("\n".join(layout))
+        # if output:
+        #     print("\n".join(layout))
         cfg = Config(maze_layout=layout, max_steps=200, fps=fps)
         env.close()
         env = PacmanEnv(cfg, human_mode=False, headless=not show_pacman)
@@ -267,16 +269,22 @@ def evaluate(
 
         total_reward += total_episode_reward
         total_steps += total_episode_steps
+        total_pellets_left += env.maze.pellets.sum()
 
         if output:
-            print(f"  ✅ Episode {ep}: reward={total_episode_reward:.2f} steps={total_episode_steps}")
+            print(
+                f"  ✅ Episode {ep}: reward={total_episode_reward:.2f} steps={total_episode_steps} pellets_left={env.maze.pellets.sum()}"
+            )
         time.sleep(0.25)
 
     avg_reward = total_reward / episodes
     avg_steps = total_steps / episodes
+    avg_pellets_left = total_pellets_left / episodes
 
     if output:
-        print(f"=== Average Reward: {avg_reward:.2f} | Average Steps: {avg_steps:.2f} ===")
+        print(
+            f"=== Average Reward: {avg_reward:.2f} | Average Steps: {avg_steps:.2f} | Average Pellets Left: {avg_pellets_left:.2f} ==="
+        )
 
     env.close()
 
@@ -287,7 +295,7 @@ def evaluate(
 if __name__ == "__main__":
     # Base directory containing all your stage runs
     run_dir = "runs"
-    run_name = "stage33"
+    run_name = "stage36"
 
     stage_path = os.path.join(run_dir, run_name)
     model_path = os.path.join(stage_path, "final_model.pt")
@@ -297,12 +305,16 @@ if __name__ == "__main__":
         cfg = pickle.load(f)
 
     spec: MazeSpec = cfg["maze_spec"]
-    # print("Loaded config:", cfg)
     print(f"🧠 Loaded {run_name} ({spec.width}x{spec.height}) with {spec.pellet_mode} mode")
 
     num_pellets = random.randint(1, (spec.width * spec.height) - 1)
     print("Number of random pellets for evaluation:", num_pellets)
 
+    num_pellets = 15
+    # spec.pellet_density = 1
+    # spec.pellet_mode = "custom"  # Override to full pellets for eval
+    spec.width = 5
+    spec.height = 5
     results = evaluate(
         model_path,
         spec,
@@ -311,7 +323,7 @@ if __name__ == "__main__":
         num_random_pellets=num_pellets,  # ✅ Vary pellet count
         show_pacman=True,
         episodes=10,
-        output=False,
+        output=True,
         delay=0,
         fps=1000,
     )
