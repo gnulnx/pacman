@@ -295,7 +295,7 @@ def evaluate(
 if __name__ == "__main__":
     # Base directory containing all your stage runs
     run_dir = "runs"
-    run_name = "stage36"
+    run_name = "stage37"
 
     stage_path = os.path.join(run_dir, run_name)
     model_path = os.path.join(stage_path, "final_model.pt")
@@ -310,11 +310,16 @@ if __name__ == "__main__":
     num_pellets = random.randint(1, (spec.width * spec.height) - 1)
     print("Number of random pellets for evaluation:", num_pellets)
 
+    # TODO you want to create seperate methods for ecah evaluation approach. Just set the MazeSpec manually along wtih evaluate(...)
+    # you only need the actual configured MazeSpec from the pickle to get width/height right.  And even then you might want to test an
+    # 8x8 on a 4x4 just to see how well it generalizes.
+    # For now just hardcode a few things to get the eval working.
     num_pellets = 15
     # spec.pellet_density = 1
     # spec.pellet_mode = "custom"  # Override to full pellets for eval
-    spec.width = 5
-    spec.height = 5
+    spec.width = 4
+    spec.height = 4
+    spec.pacman_start = (0, 0)
     results = evaluate(
         model_path,
         spec,
