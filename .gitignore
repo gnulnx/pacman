@@ -1,0 +1,121 @@
+# --------------------------------------------------------------------
+# 🐍 Python / PyTorch / Machine Learning Project .gitignore
+# --------------------------------------------------------------------
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+pytestdebug.log
+
+# PyCharm / VSCode / JetBrains
+.idea/
+.vscode/
+*.code-workspace
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# mypy / type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# Cython debug symbols
+cython_debug/
+
+# Logs
+*.log
+logs/
+*.out
+*.err
+
+# Local runtime / debug artifacts
+*.DS_Store
+*.swp
+*.swo
+*.bak
+*.tmp
+*~
+profile_default/
+ipython_config.py
+
+# Training artifacts
+runs/
+runs_backup/
+failed_runs/
+evaluated_models/
+
+# Model files and large binary assets
+*.pt
+*.pth
+*.pkl
+*.h5
+*.ckpt
+
+# Cache / experiment outputs
+.cache/
+outputs/
+checkpoints/
+weights/
+
+# Coverage / profiling data
+.prof
+.profraw
+.profdata
+
+# System files
+Thumbs.db
+Desktop.ini
