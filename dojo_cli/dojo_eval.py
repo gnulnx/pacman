@@ -1,24 +1,37 @@
+#!/usr/bin/env python
 """
-dojo_eval.py — Parallel evaluation for Dojo RL agents.
+dojo_eval.py
+------------
+Extended evaluation CLI for Dojo RL models.
 
-Adds multiprocessing support to evaluate multiple models concurrently.
+Features
+========
+• Evaluate a single model or an entire directory (e.g. runs/)
+• Limit checkpoint types via --models (best, final)
+• Force CPU evaluation with torch thread control (default)
+• Produce a live-updating summary file sorted by map size and score
+• Show Top-N results per size category and Top-5 overall winners
 
-Each model file is evaluated in its own process to avoid GIL contention
-and interference between torch/pygame instances. Results are collected,
-grouped by maze size, sorted, and written to evaluation_summary.txt.
+Example usage
+=============
+# Evaluate one model
+dojo eval runs/stage56/final_model.pt --episodes 10 --device cpu
 
-───────────────────────────────
-Usage Examples
-───────────────────────────────
-# Evaluate all models under runs/ using 4 worker processes
-dojo eval runs/ --models best,final --procs 4
+# Evaluate all stages in runs/ using both best and final models
+dojo eval runs/ --models best,final --top-n 10
+
+NOTE Performance testing shows it's faster to on cpu than mps for eval:
+----------------------------------------
+Device	User CPU Time	System Time	CPU Utilization	Wall Time (Real)
+CPU	1345 s	2253 s	856 %	7 min 0 sec
+MPS	509 s	129 s	103 %	10 min 17 sec
 """
 
 import os
 import pickle
+import sys
 import time
-from collections import defaultdict
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool
 
 import click
 
@@ -27,24 +40,26 @@ from eval_agent import (
     evaluate_full_model_random_pacman_start_same_size_map,
     evaluate_random_start_same_size_map,
 )
+from pacman_env import MazeSpec
 
 
-# ---------------------------------------------------------------------
-# Worker function: executed in separate process
-# ---------------------------------------------------------------------
-def _evaluate_single_model(args, device="cpu"):
-    model_path, episodes, delay, fps = args
+# ---------- helper for per-model evaluation ----------
+def _evaluate_single_model(args):
+    model_path, episodes, delay, fps, device = args
+    # torch.set_num_threads(1)
+    # torch.set_num_interop_threads(1)
+    # torch.set_default_device("cpu")  # enforce CPU; use device flag later if expanded
+
+    stage_dir = os.path.dirname(model_path)
+    cfg_path = os.path.join(stage_dir, "config.pkl")
+    if not os.path.exists(cfg_path):
+        return None
+
+    with open(cfg_path, "rb") as f:
+        cfg = pickle.load(f)
+    spec: MazeSpec = cfg["maze_spec"]
+
     try:
-        stage_dir = os.path.dirname(model_path)
-        config_path = os.path.join(stage_dir, "config.pkl")
-        if not os.path.exists(config_path):
-            return (model_path, None, "missing config.pkl", None)
-
-        with open(config_path, "rb") as f_cfg:
-            cfg = pickle.load(f_cfg)
-        spec = cfg["maze_spec"]
-        size_label = f"{spec.width}x{spec.height}"
-
         r1 = evaluate_full_model_random_pacman_start_same_size_map(
             model_path, spec, episodes=episodes, delay=delay, fps=fps, device=device
         )
@@ -52,91 +67,92 @@ def _evaluate_single_model(args, device="cpu"):
             model_path, spec, episodes=episodes, delay=delay, fps=fps, device=device
         )
         r3 = evaluate_cross_size(model_path, spec, episodes_per_size=episodes, delay=delay, fps=fps, device=device)
-
         final_score = (r1 + r2 + sum(r3.values())) / (2 + len(r3))
-        return (model_path, final_score, None, size_label)
-
+        return ((spec.width, spec.height), final_score, model_path)
     except Exception as e:
-        return (model_path, None, str(e), None)
+        print(f"❌ Error evaluating {model_path}: {e}")
+        return None
 
 
-# ---------------------------------------------------------------------
-# CLI command
-# ---------------------------------------------------------------------
+# ---------- main CLI command ----------
 @click.command("eval")
 @click.argument("path", type=click.Path(exists=True))
 @click.option("--episodes", default=10, help="Number of episodes per test.")
 @click.option("--delay", default=0.0, help="Frame delay (0 for max speed).")
-@click.option("--fps", default=1000, help="Simulation FPS.")
-@click.option("--device", default="cpu", help="Device to run evaluations on (cpu, mps, or cuda).")
-@click.option(
-    "--models",
-    default="best,final",
-    help="Comma-separated checkpoint types to evaluate (options: best,final,model).",
-)
-@click.option("--procs", default=min(4, cpu_count()), help="Number of parallel processes.")
-@click.option("--output", default="evaluation_summary.txt", help="File to save results.")
-def eval_cmd(path, episodes, delay, fps, device, models, procs, output):
-    """Evaluate one model file or all models in a directory (in parallel)."""
-    start_time = time.time()
-    selected_types = [m.strip().lower() for m in models.split(",")]
-    print(f"🔎 Evaluating {path} (checkpoints: {', '.join(selected_types)}, procs={procs})")
+@click.option("--fps", default=1000, help="Frames per second.")
+@click.option("--models", default="best,final", help="Comma-separated model types to evaluate.")
+@click.option("--device", default="cpu", help="Device to use (cpu, mps, cuda).")
+@click.option("--procs", default=4, help="Number of parallel processes.")
+@click.option("--top-n", default=10, help="Show only top N per maze size (default 10).")
+def eval_cmd(path, episodes, delay, fps, models, device, procs, top_n):
+    """Evaluate one model or all models in a directory and summarize results."""
+    model_types = [m.strip() for m in models.split(",") if m.strip()]
+    summary_path = "evaluation_summary.txt"
 
-    # Collect model paths
-    model_paths = []
+    with open(summary_path, "w") as f:
+        f.write(f"📊 Dojo Evaluation Summary ({time.ctime()})\n")
+        f.write(f"Evaluating models from {path}\n")
+        f.write(f"Checkpoint types: {', '.join(model_types)}\n\n")
+
+    # --- gather model paths ---
+    tasks = []
     if os.path.isdir(path):
         for root, _, files in os.walk(path):
-            for file in files:
-                if not file.endswith(".pt"):
-                    continue
-                if any(f"{t}_model" in file.lower() for t in selected_types):
-                    model_paths.append(os.path.join(root, file))
-        model_paths.sort()
-        print(f"🧩 Found {len(model_paths)} model(s) to evaluate under {path}")
+            for mtype in model_types:
+                fname = f"{mtype}_model.pt"
+                if fname in files:
+                    tasks.append((os.path.join(root, fname), episodes, delay, fps, device))
     else:
-        model_paths = [path]
+        tasks.append((path, episodes, delay, fps, device))
 
-    if not model_paths:
-        print("❌ No model files found matching your filters.")
-        return
+    if not tasks:
+        print("⚠️  No matching model files found.")
+        sys.exit(1)
 
-    results_by_size = defaultdict(list)
-    with open(output, "w") as f:
-        f.write(f"📊 Dojo Evaluation Summary ({time.ctime()})\n")
-        f.write(f"Evaluating {len(model_paths)} model(s) from {path}\n")
-        f.write(f"Checkpoint types: {', '.join(selected_types)}\n\n")
-        f.flush()
+    print(f"🧠 Evaluating {len(tasks)} model(s) using {procs} process(es)...")
 
-        # Run in parallel
-        tasks = [(m, episodes, delay, fps) for m in model_paths]
-        with Pool(processes=procs) as pool:
-            for idx, (model_path, score, err, size_label) in enumerate(
-                pool.imap_unordered(_evaluate_single_model, [(task + (device,)) for task in tasks]), 1
-            ):
-                if err:
-                    print(f"❌ [{idx}/{len(model_paths)}] {os.path.basename(model_path)} failed: {err}")
-                    f.write(f"ERROR {model_path}: {err}\n")
-                else:
-                    results_by_size[size_label].append((score, model_path))
-                    print(f"✅ [{idx}/{len(model_paths)}] {os.path.basename(model_path)} → {score:.4f}")
-                    f.write(f"{size_label:<6} {score:>8.4f}  {model_path}\n")
-                f.flush()
+    # --- parallel evaluation ---
+    results = []
+    with Pool(processes=procs) as pool:
+        for res in pool.imap_unordered(_evaluate_single_model, tasks):
+            if res is None:
+                continue
+            results.append(res)
+            (w, h), score, path_ = res
+            # live logging
+            with open(summary_path, "a") as f:
+                f.write(f"{w}x{h:<5} {score:>9.4f}  {path_}\n")
+            print(f"✅ {w}x{h}  {score:.4f}  {os.path.basename(path_)}")
+    if not results:
+        print("❌ No successful evaluations.")
+        sys.exit(1)
 
-        # Sort results at the end
+    # --- sort and group results ---
+    by_size = {}
+    for (w, h), score, path_ in results:
+        key = f"{w}x{h}"
+        by_size.setdefault(key, []).append((score, path_))
+
+    with open(summary_path, "a") as f:
         f.write("\n📈 Sorted Results by Size:\n\n")
-        for size in sorted(results_by_size.keys()):
+        for size in sorted(by_size):
             f.write(f"{size}\n")
-            results_by_size[size].sort(key=lambda x: x[0], reverse=True)
-            for score, model in results_by_size[size]:
-                f.write(f"  {score:>8.4f}  {os.path.basename(os.path.dirname(model))}/{os.path.basename(model)}\n")
+            sorted_results = sorted(by_size[size], key=lambda x: x[0], reverse=True)
+            top_entries = sorted_results[:top_n]
+            for sc, pth in top_entries:
+                f.write(f"    {sc:8.4f}  {os.path.basename(os.path.dirname(pth))}/{os.path.basename(pth)}\n")
             f.write("\n")
 
-    elapsed = time.time() - start_time
-    print(f"\n✅ Evaluation complete in {elapsed:.1f}s")
-    print(f"📝 Results saved to {output}")
+        # overall top 5
+        # Top 5 overall models across all map sizes
+        all_sorted = sorted(results, key=lambda x: x[1], reverse=True)[:5]
+        f.write("🏆 Top 5 Overall Models\n")
+        for (w, h), sc, pth in all_sorted:
+            label = f"{w}x{h}"
+            f.write(f"    {label:<6} {sc:8.4f}  {os.path.basename(os.path.dirname(pth))}/{os.path.basename(pth)}\n")
 
-    # Print quick summary
-    for size, entries in sorted(results_by_size.items()):
-        print(f"\n📦 {size}")
-        for score, model in sorted(entries, key=lambda x: x[0], reverse=True):
-            print(f"  {score:>8.3f}  {os.path.basename(os.path.dirname(model))}/{os.path.basename(model)}")
+    print(f"\n✅ Evaluation complete. Results saved to {summary_path}")
+
+
+if __name__ == "__main__":
+    eval_cmd()
