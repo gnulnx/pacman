@@ -29,34 +29,6 @@ from pacman_env import (  # noqa
 # torch.manual_seed(seed)
 
 
-# def visualize_failed_record(env, record, pause=True):
-#     """
-#     Visually confirm that a saved failure record can be reconstructed.
-#     This assumes pygame is still active and 'env' is a PacmanEnv instance.
-#     """
-#     state = record["final_state"]
-
-#     # --- Restore maze pellets ---
-#     env.maze.pellets = np.array(state["pellets"], dtype=np.uint8)
-
-#     # --- Restore Pac-Man ---
-#     env.pacman.position = tuple(state["pacman"])
-
-#     # --- Restore ghosts (if any) ---
-#     for g, pos in zip(env.ghosts, state["ghosts"]):
-#         g.position = tuple(pos)
-
-#     # --- Re-render the restored state ---
-#     env.render("human")
-#     print(f"🔍 Visualizing failed episode {record['episode']}")
-#     print(f"  Pellets remaining: {record['pellets_remaining']}")
-#     print(f"  Reward: {record['reward']:.2f} | Steps: {record['steps']}")
-#     print(f"  Failure reason: {record['failure_reason']}")
-
-#     if pause:
-#         input("🟡 Press Enter to continue...")
-
-
 def evaluate(
     model_path: str,
     maze_spec: MazeSpec,
@@ -163,9 +135,7 @@ def evaluate(
                 pellets_remaining=int(env.maze.pellets.sum()),
                 failure_reason="pellets_remaining",
             )
-            # visualize_failed_record(env, last_record)
             recorder.save()
-            input("checkpoint (press Enter to continue)")
 
         if output:
             print(
