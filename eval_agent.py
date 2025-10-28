@@ -451,7 +451,7 @@ def evaluate_cross_size(
 if __name__ == "__main__":
     # Base directory containing all your stage runs
     run_dir = "runs"
-    run_name = "stage30"
+    run_name = "stage37"
 
     stage_path = os.path.join(run_dir, run_name)
     model_path = os.path.join(stage_path, "final_model.pt")

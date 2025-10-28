@@ -162,7 +162,7 @@ def eval_cmd(paths, episodes, delay, fps, models, device, procs, top_n):
             f.write(f"    {label:<6} {sc:8.4f}  {os.path.basename(os.path.dirname(pth))}/{os.path.basename(pth)}\n")
             top_paths.append(pth)
 
-        rerun_cmd = "dojo eval " + " ".join(top_paths) + " --models=best,final --device=cpu  --episodes=25 "
+        rerun_cmd = "dojo eval " + " ".join(top_paths) + " --models=best,final --device=cpu --procs=10 --episodes=25 "
         f.write("\n💡 Tip: To re-evaluate the top 10 with more episodes, run:\n")
         f.write(f"    {rerun_cmd}\n")
 
