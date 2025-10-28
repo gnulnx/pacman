@@ -40,6 +40,7 @@ def evaluate(
     num_random_pellets: int = 1,
     show_pacman: bool = False,
     output: bool = True,
+    device: str = "cpu",
 ) -> float:
     """
     Evaluate a trained Pac-Man agent under various randomization modes.
@@ -56,7 +57,7 @@ def evaluate(
     initial_layout = tuple(generate_rect_layout(base_spec))
     env = PacmanEnv(Config(maze_layout=initial_layout, fps=fps), human_mode=False, headless=not show_pacman)
     sample_state = preprocess_state(env.reset())
-    agent = Agent(sample_state.shape, len(ACTIONS))
+    agent = Agent(sample_state.shape, len(ACTIONS), device=device)
     agent.model.load_state_dict(torch.load(model_path, map_location="cpu"))
     agent.model.eval()
 
@@ -166,6 +167,7 @@ def evaluate_full_model_random_pacman_start_same_size_map(
     fps: int = 100,
     show_pacman: bool = False,
     output: bool = True,
+    device: str = "cpu",
 ):
 
     return evaluate(
@@ -184,6 +186,7 @@ def evaluate_full_model_random_pacman_start_same_size_map(
         output=output,
         delay=delay,
         fps=fps,
+        device=device,
     )
 
 
@@ -196,6 +199,7 @@ def evaluate_random_start_same_size_map(
     show_pacman: bool = False,
     output: bool = True,
     num_pellets: int = None,
+    device: str = "cpu",
 ):
     if num_pellets is None:
         num_pellets = random.randint(1, (maze_spec.width * maze_spec.height) - 1)
@@ -218,6 +222,7 @@ def evaluate_random_start_same_size_map(
         output=output,
         delay=delay,
         fps=fps,
+        device=device,
     )
 
 
@@ -230,6 +235,7 @@ def evaluate_cross_size(
     fps: int = 200,
     show_pacman: bool = False,
     output: bool = True,
+    device: str = "cpu",
 ) -> dict[int, float]:
     """
     Evaluate a trained model on *different maze sizes* to measure cross-scale generalization.
@@ -291,6 +297,7 @@ def evaluate_cross_size(
             delay=delay,
             fps=fps,
             output=False,
+            device=device,
         )
 
         scores[size] = score
