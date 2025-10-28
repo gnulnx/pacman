@@ -29,6 +29,136 @@ from pacman_env import (  # noqa
 # torch.manual_seed(seed)
 
 
+# def evaluate(
+#     model_path: str,
+#     maze_spec: MazeSpec,
+#     episodes: int = 5,
+#     delay: float = 0.25,
+#     fps: int = 100,
+#     random_pacman_start: bool = False,
+#     randomize_pellets: bool = False,
+#     num_random_pellets: int = 1,
+#     show_pacman: bool = False,
+#     output: bool = True,
+#     device: str = "cpu",
+# ) -> float:
+#     """
+#     Evaluate a trained Pac-Man agent under various randomization modes.
+
+#     Modes:
+#       1. Spec-exact                      -> random_pacman_start=False, randomize_pellets=False
+#       2. Random Pac-Man start            -> random_pacman_start=True,  randomize_pellets=False
+#       3. Random Pac-Man + random pellets -> random_pacman_start=True,  randomize_pellets=True
+#          (num_random_pellets controls how many pellets are placed)
+#     """
+#     base_spec: MazeSpec = copy.deepcopy(maze_spec)
+
+#     # Build agent once
+#     initial_layout = tuple(generate_rect_layout(base_spec))
+#     env = PacmanEnv(Config(maze_layout=initial_layout, fps=fps), human_mode=False, headless=not show_pacman)
+#     sample_state = preprocess_state(env.reset())
+#     agent = Agent(sample_state.shape, len(ACTIONS), device=device)
+#     agent.model.load_state_dict(torch.load(model_path, map_location="cpu"))
+#     agent.model.eval()
+
+#     print("pellet count: ", env.maze.pellets.sum())
+
+#     if output:
+#         print(f"🎯 Evaluating {model_path} on {base_spec.width}x{base_spec.height} maze...")
+
+#     total_reward, total_steps, total_pellets_left = 0.0, 0, 0
+
+#     run_name = os.path.basename(model_path)
+#     recorder = FailedRunRecorder(run_name=run_name)
+
+#     for ep in range(episodes):
+#         # --- Derive episode-specific spec ---
+#         ep_spec = copy.deepcopy(base_spec)
+
+#         # (1) Randomize Pac-Man start
+#         if random_pacman_start:
+#             start_x = random.randint(0, ep_spec.width - 1)
+#             start_y = random.randint(0, ep_spec.height - 1)
+#             ep_spec = replace(ep_spec, pacman_start=(start_x, start_y))
+
+#         # (2) Randomize pellets if requested
+#         if randomize_pellets:
+#             pellets = []
+#             while len(pellets) < num_random_pellets:
+#                 pos = (
+#                     random.randint(0, ep_spec.width - 1),
+#                     random.randint(0, ep_spec.height - 1),
+#                 )
+#                 if pos != ep_spec.pacman_start and pos not in pellets:
+#                     pellets.append(pos)
+#             ep_spec = replace(ep_spec, pellet_mode="custom", pellet_positions=pellets)
+
+#         # --- Rebuild env for this episode ---
+#         layout = tuple(generate_rect_layout(ep_spec))
+#         cfg = Config(maze_layout=layout, max_steps=200, fps=fps)
+#         env.close()
+#         env = PacmanEnv(cfg, human_mode=False, headless=not show_pacman)
+
+#         # Render first frame right after reset (so Pac-Man is visible before moving)
+#         state = preprocess_state(env.reset())
+#         if show_pacman:
+#             env.render("human")
+
+#         done = False
+#         total_episode_reward, total_episode_steps = 0.0, 0
+
+#         while not done:
+#             with torch.no_grad():
+#                 s = torch.tensor(state, dtype=torch.float32, device=agent.device).unsqueeze(0)
+#                 action = int(torch.argmax(agent.model(s)).item())
+#             next_state, reward, done, _ = env.step(action)
+#             # print(f"reward={reward} done={done}")
+#             state = preprocess_state(next_state)
+#             if show_pacman:
+#                 env.render("human")
+#             total_episode_reward += reward
+#             total_episode_steps += 1
+#             time.sleep(delay)
+
+#         total_reward += total_episode_reward
+#         total_steps += total_episode_steps
+#         total_pellets_left += env.maze.pellets.sum()
+
+#         if env.maze.pellets.sum() != 0:
+#             # At this point we need to write/save the final layout to retrain on
+#             recorder.record_failure(
+#                 env=env,
+#                 episode=ep,
+#                 maze_spec=ep_spec,
+#                 final_state=env._get_state(),
+#                 reward=total_episode_reward,
+#                 steps=total_episode_steps,
+#                 pellets_remaining=int(env.maze.pellets.sum()),
+#                 failure_reason="pellets_remaining",
+#             )
+#             recorder.save()
+
+#         if output:
+#             print(
+#                 f"  ✅ Episode {ep}: reward={total_episode_reward:.2f} steps={total_episode_steps} pellets_left={env.maze.pellets.sum()}"
+#             )
+#         time.sleep(0.25)
+
+#     avg_reward = total_reward / episodes
+#     avg_steps = total_steps / episodes
+#     avg_pellets_left = total_pellets_left / episodes
+
+#     if output:
+#         print(
+#             f"=== Average Reward: {avg_reward:.2f} | Average Steps: {avg_steps:.2f} | Average Pellets Left: {avg_pellets_left:.2f} ==="
+#         )
+
+#     env.close()
+
+#     # Simple efficiency metric (higher is better)
+#     return avg_reward / (avg_steps if avg_steps > 0 else 1.0)
+
+
 def evaluate(
     model_path: str,
     maze_spec: MazeSpec,
@@ -41,47 +171,45 @@ def evaluate(
     show_pacman: bool = False,
     output: bool = True,
     device: str = "cpu",
+    normalize_by_size: bool = True,
 ) -> float:
     """
     Evaluate a trained Pac-Man agent under various randomization modes.
 
-    Modes:
-      1. Spec-exact                      -> random_pacman_start=False, randomize_pellets=False
-      2. Random Pac-Man start            -> random_pacman_start=True,  randomize_pellets=False
-      3. Random Pac-Man + random pellets -> random_pacman_start=True,  randomize_pellets=True
-         (num_random_pellets controls how many pellets are placed)
+    Parameters
+    ----------
+    normalize_by_size : bool
+        If True, the final efficiency score is normalized by maze area and
+        completion percentage so models of different sizes can be compared fairly.
     """
     base_spec: MazeSpec = copy.deepcopy(maze_spec)
 
-    # Build agent once
+    # --- Build agent and env once ---
     initial_layout = tuple(generate_rect_layout(base_spec))
     env = PacmanEnv(Config(maze_layout=initial_layout, fps=fps), human_mode=False, headless=not show_pacman)
     sample_state = preprocess_state(env.reset())
+
     agent = Agent(sample_state.shape, len(ACTIONS), device=device)
-    agent.model.load_state_dict(torch.load(model_path, map_location="cpu"))
+    agent.model.load_state_dict(torch.load(model_path, map_location=device))
     agent.model.eval()
 
-    print("pellet count: ", env.maze.pellets.sum())
+    total_reward, total_steps, total_pellets_left = 0.0, 0, 0
+    total_pellets_start = 0.0
+    total_pellets = env.maze.pellets.sum()
 
     if output:
         print(f"🎯 Evaluating {model_path} on {base_spec.width}x{base_spec.height} maze...")
 
-    total_reward, total_steps, total_pellets_left = 0.0, 0, 0
-
-    run_name = os.path.basename(model_path)
-    recorder = FailedRunRecorder(run_name=run_name)
+    recorder = FailedRunRecorder(run_name=os.path.basename(model_path))
 
     for ep in range(episodes):
-        # --- Derive episode-specific spec ---
         ep_spec = copy.deepcopy(base_spec)
 
-        # (1) Randomize Pac-Man start
+        # Randomize starts / pellets
         if random_pacman_start:
-            start_x = random.randint(0, ep_spec.width - 1)
-            start_y = random.randint(0, ep_spec.height - 1)
-            ep_spec = replace(ep_spec, pacman_start=(start_x, start_y))
-
-        # (2) Randomize pellets if requested
+            ep_spec = replace(
+                ep_spec, pacman_start=(random.randint(0, ep_spec.width - 1), random.randint(0, ep_spec.height - 1))
+            )
         if randomize_pellets:
             pellets = []
             while len(pellets) < num_random_pellets:
@@ -93,70 +221,78 @@ def evaluate(
                     pellets.append(pos)
             ep_spec = replace(ep_spec, pellet_mode="custom", pellet_positions=pellets)
 
-        # --- Rebuild env for this episode ---
         layout = tuple(generate_rect_layout(ep_spec))
         cfg = Config(maze_layout=layout, max_steps=200, fps=fps)
         env.close()
         env = PacmanEnv(cfg, human_mode=False, headless=not show_pacman)
-
-        # Render first frame right after reset (so Pac-Man is visible before moving)
         state = preprocess_state(env.reset())
+        state = preprocess_state(env.reset())
+        start_pellets = float(env.maze.pellets.sum())  # <-- add this
+        total_pellets_start += start_pellets  # <-- and this
         if show_pacman:
             env.render("human")
 
         done = False
-        total_episode_reward, total_episode_steps = 0.0, 0
-
+        ep_reward, ep_steps = 0.0, 0
         while not done:
             with torch.no_grad():
                 s = torch.tensor(state, dtype=torch.float32, device=agent.device).unsqueeze(0)
                 action = int(torch.argmax(agent.model(s)).item())
             next_state, reward, done, _ = env.step(action)
-            # print(f"reward={reward} done={done}")
             state = preprocess_state(next_state)
             if show_pacman:
                 env.render("human")
-            total_episode_reward += reward
-            total_episode_steps += 1
-            time.sleep(delay)
+            ep_reward += reward
+            ep_steps += 1
+            if delay:
+                time.sleep(delay)
 
-        total_reward += total_episode_reward
-        total_steps += total_episode_steps
-        total_pellets_left += env.maze.pellets.sum()
+        pellets_left = env.maze.pellets.sum()
+        total_reward += ep_reward
+        total_steps += ep_steps
+        total_pellets_left += pellets_left
 
-        if env.maze.pellets.sum() != 0:
-            # At this point we need to write/save the final layout to retrain on
+        # Save failed layouts
+        if pellets_left > 0:
             recorder.record_failure(
                 env=env,
                 episode=ep,
                 maze_spec=ep_spec,
                 final_state=env._get_state(),
-                reward=total_episode_reward,
-                steps=total_episode_steps,
-                pellets_remaining=int(env.maze.pellets.sum()),
+                reward=ep_reward,
+                steps=ep_steps,
+                pellets_remaining=int(pellets_left),
                 failure_reason="pellets_remaining",
             )
             recorder.save()
 
         if output:
-            print(
-                f"  ✅ Episode {ep}: reward={total_episode_reward:.2f} steps={total_episode_steps} pellets_left={env.maze.pellets.sum()}"
-            )
-        time.sleep(0.25)
+            print(f"  ✅ Ep{ep}: reward={ep_reward:.1f} steps={ep_steps} pellets_left={pellets_left}")
 
     avg_reward = total_reward / episodes
     avg_steps = total_steps / episodes
     avg_pellets_left = total_pellets_left / episodes
-
-    if output:
-        print(
-            f"=== Average Reward: {avg_reward:.2f} | Average Steps: {avg_steps:.2f} | Average Pellets Left: {avg_pellets_left:.2f} ==="
-        )
-
+    avg_pellets_start = total_pellets_start / episodes
+    return max(0.0, 1.0 - (avg_pellets_left / max(avg_pellets_start, 1.0)))
     env.close()
 
-    # Simple efficiency metric (higher is better)
-    return avg_reward / (avg_steps if avg_steps > 0 else 1.0)
+    # --- Normalized efficiency metric ---
+    if normalize_by_size:
+        # completion ratio ∈ [0,1]
+        completion_ratio = max(0.0, 1.0 - (avg_pellets_left / max(total_pellets, 1)))
+        # reward per cell
+        reward_density = avg_reward / (maze_spec.width * maze_spec.height)
+        # combine normalized components
+        efficiency = (completion_ratio + reward_density) / 2.0
+    else:
+        # legacy metric
+        efficiency = avg_reward / (avg_steps if avg_steps > 0 else 1)
+
+    if output:
+        norm_label = "normalized" if normalize_by_size else "raw"
+        print(f"=== {norm_label} efficiency: {efficiency:.4f} ===")
+
+    return efficiency
 
 
 def evaluate_full_model_random_pacman_start_same_size_map(
@@ -315,7 +451,7 @@ def evaluate_cross_size(
 if __name__ == "__main__":
     # Base directory containing all your stage runs
     run_dir = "runs"
-    run_name = "stage56"
+    run_name = "stage30"
 
     stage_path = os.path.join(run_dir, run_name)
     model_path = os.path.join(stage_path, "final_model.pt")
