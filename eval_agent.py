@@ -154,6 +154,7 @@ def evaluate(
         if env.maze.pellets.sum() != 0:
             # At this point we need to write/save the final layout to retrain on
             recorder.record_failure(
+                env=env,
                 episode=ep,
                 maze_spec=ep_spec,
                 final_state=env._get_state(),
