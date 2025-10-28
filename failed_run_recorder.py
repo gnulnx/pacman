@@ -9,6 +9,18 @@ import pygame
 from pacman_env import Config, MazeSpec, PacmanEnv
 
 
+def _to_native(obj):
+    if isinstance(obj, np.ndarray):
+        return obj.astype(int).tolist()
+    elif isinstance(obj, (np.integer, np.int32, np.int64, np.int16)):
+        return int(obj)
+    elif isinstance(obj, (list, tuple)):
+        return [_to_native(x) for x in obj]
+    elif isinstance(obj, dict):
+        return {k: _to_native(v) for k, v in obj.items()}
+    return obj
+
+
 class FailedRunRecorder:
     """Collects, saves, and replays failed Pac-Man runs for retraining/debugging."""
 
@@ -57,8 +69,9 @@ class FailedRunRecorder:
             "reward": reward,
             "failure_reason": failure_reason,
         }
-
+        record = _to_native(record)
         self._buffer.append(record)
+
         return record
 
     # ------------------------------------------------------------------

@@ -158,6 +158,153 @@ def evaluate(
     return avg_reward / (avg_steps if avg_steps > 0 else 1.0)
 
 
+def evaluate_full_model_random_pacman_start_same_size_map(
+    model_path: str,
+    maze_spec: MazeSpec,
+    episodes: int = 5,
+    delay: float = 0.25,
+    fps: int = 100,
+    show_pacman: bool = False,
+    output: bool = True,
+):
+
+    return evaluate(
+        model_path,
+        MazeSpec(
+            width=maze_spec.width,
+            height=maze_spec.height,
+            pellet_mode="full",
+            include_ghosts=False,
+            include_power_pellets=False,
+            surround_walls=True,
+        ),
+        random_pacman_start=True,  # ✅ Random start each episode
+        show_pacman=show_pacman,
+        episodes=episodes,
+        output=output,
+        delay=delay,
+        fps=fps,
+    )
+
+
+def evaluate_random_start_same_size_map(
+    model_path: str,
+    maze_spec: MazeSpec,
+    episodes: int = 5,
+    delay: float = 0.25,
+    fps: int = 100,
+    show_pacman: bool = False,
+    output: bool = True,
+    num_pellets: int = None,
+):
+    if num_pellets is None:
+        num_pellets = random.randint(1, (maze_spec.width * maze_spec.height) - 1)
+
+    return evaluate(
+        model_path,
+        MazeSpec(
+            width=maze_spec.width,
+            height=maze_spec.height,
+            pellet_mode="custom",
+            include_ghosts=False,
+            include_power_pellets=False,
+            surround_walls=True,
+        ),
+        random_pacman_start=True,  # ✅ Random start each episode
+        randomize_pellets=True,  # ✅ Random pellet layout each episode
+        num_random_pellets=num_pellets,  # ✅ Vary pellet count
+        show_pacman=show_pacman,
+        episodes=episodes,
+        output=output,
+        delay=delay,
+        fps=fps,
+    )
+
+
+def evaluate_cross_size(
+    model_path: str,
+    base_spec: MazeSpec,
+    target_sizes: tuple[int, ...] = (4, 8, 12),
+    episodes_per_size: int = 5,
+    delay: float = 0.0,
+    fps: int = 200,
+    show_pacman: bool = False,
+    output: bool = True,
+) -> dict[int, float]:
+    """
+    Evaluate a trained model on *different maze sizes* to measure cross-scale generalization.
+
+    This evaluation mode asks:
+        "Can a policy trained on one environment size (e.g. 8x8)
+         adapt its strategy to smaller or larger grids (e.g. 4x4, 12x12)?"
+
+    For each target size, this function:
+      1. Builds a new MazeSpec of the requested width/height
+      2. Uses `pellet_mode="custom"` with randomized pellet layouts
+      3. Enables random Pac-Man start position
+      4. Runs a small evaluation batch via `evaluate(...)`
+      5. Records the model's normalized efficiency score for that size
+
+    Returns
+    -------
+    dict[int, float]
+        A mapping of maze size → performance score, where higher scores
+        indicate better transfer/generalization of the trained policy.
+
+    Example
+    -------
+    >>> results = evaluate_cross_size("runs/stage56/final_model.pt", spec, target_sizes=(4, 8, 12))
+    >>> print(results)
+    {4: 0.58, 8: 0.61, 12: 0.47}
+    """
+
+    scores: dict[int, float] = {}
+
+    if output:
+        print("🔍 Cross-size generalization evaluation")
+        print("----------------------------------------")
+
+    for size in target_sizes:
+        # Dynamically adjust maze spec for each test size
+        test_spec = MazeSpec(
+            width=size,
+            height=size,
+            include_ghosts=False,
+            include_power_pellets=False,
+            surround_walls=True,
+            pellet_mode="custom",
+        )
+
+        num_pellets = random.randint(1, (size * size) - 1)
+
+        if output:
+            print(f"⚙️  Testing {size}x{size} map with {num_pellets} random pellets...")
+
+        score = evaluate(
+            model_path,
+            test_spec,
+            random_pacman_start=True,
+            randomize_pellets=True,
+            num_random_pellets=num_pellets,
+            show_pacman=show_pacman,
+            episodes=episodes_per_size,
+            delay=delay,
+            fps=fps,
+            output=False,
+        )
+
+        scores[size] = score
+
+        if output:
+            print(f"  ✅ {size}x{size} → Score: {score:.4f}")
+
+    if output:
+        print("----------------------------------------")
+        print(f"🏁 Cross-size results: {scores}")
+
+    return scores
+
+
 if __name__ == "__main__":
     # Base directory containing all your stage runs
     run_dir = "runs"
@@ -176,97 +323,38 @@ if __name__ == "__main__":
     num_pellets = random.randint(1, (spec.width * spec.height) - 1)
     print("Number of random pellets for evaluation:", num_pellets)
 
-    # TODO you want to create seperate methods for ecah evaluation approach. Just set the MazeSpec manually along wtih evaluate(...)
-    # you only need the actual configured MazeSpec from the pickle to get width/height right.  And even then you might want to test an
-    # 8x8 on a 4x4 just to see how well it generalizes.
-    # For now just hardcode a few things to get the eval working.
-    # num_pellets = 15
-    # spec.pellet_density = 1
-    # spec.pellet_mode = "custom"  # Override to full pellets for eval
-    # spec.width = 4
-    # spec.height = 4
-    spec.pacman_start = (0, 0)
-    results = evaluate(
+    episodes = 10
+
+    results_1 = evaluate_full_model_random_pacman_start_same_size_map(
         model_path,
         spec,
-        random_pacman_start=True,  # ✅ Random start each episode
-        randomize_pellets=True,  # ✅ Random pellet layout each episode
-        num_random_pellets=num_pellets,  # ✅ Vary pellet count
+        episodes=episodes,
         show_pacman=True,
-        episodes=1000,
         output=True,
         delay=0,
         fps=1000,
     )
-    print(f"Final evaluation score: {results:.2f}")
-
-    sys.exit(0)
-
-    # # Optional: loop through all stages later
-    # evaluated_dir = "evaluated_models"
-    # os.makedirs(evaluated_dir, exist_ok=True)
-
-    ############ NEW METHOD ############
-    run_dir = "runs"
-
-    # def _score_from_cfg(cfg: dict):
-    #     # Prefer higher success_rate, then higher avg_reward, then lower std_reward
-    #     sr  = cfg.get("success_rate")
-    #     avg = cfg.get("avg_reward")
-    #     std = cfg.get("std_reward")
-    #     # Fallbacks ensure comparable tuples even if keys are missing
-    #     return (
-    #         sr if sr is not None else -1.0,
-    #         avg if avg is not None else float("-inf"),
-    #         -(std if std is not None else 0.0),
-    #     )
-
-    # best_by_size = {}  # size_key -> {"score": tuple, "run_name": str, "stage_path": str}
-    print("Evaluating all runs in:", run_dir)
-    print("-----------------------------------")
-    for run_name in sorted(os.listdir(run_dir)):
-        stage_path = os.path.join(run_dir, run_name)
-        cfg_path = os.path.join(stage_path, "config.pkl")
-        model_path = os.path.join(stage_path, "final_model.pt")
-
-        # Check it config file exists
-        if not os.path.isfile(cfg_path):
-            print(f"⚠️  Skipping {run_name}, no config.pkl found.")
-            continue
-
-        # print("stage_path:", stage_path)
-        # Read the config file
-        with open(cfg_path, "rb") as f:
-            cfg = pickle.load(f)
-
-        # print(cfg)
-        spec: generate_rect_layout = cfg["maze_spec"]
-
-        config_class = f"{spec.width}x{spec.height}"
-        config_name = f"{run_name}_{config_class}_{spec.pellet_mode}"
-        # print(f"🧠 Loaded {config_name} in class {config_class}")
-        # print("MazeSpec:", spec)
-        spec = MazeSpec(
-            width=spec.width,
-            height=spec.height,
-            include_ghosts=spec.include_ghosts,
-            # ghost_positions=spec.ghost_positions,
-            pellet_positions=spec.pellet_positions,
-            pellet_mode=spec.pellet_mode,
-            include_power_pellets=False,
-            surround_walls=True,
-        )
-        # print("MazeSpec:", spec)
-        # input()
-        score = evaluate(
-            model_path,
-            spec,
-            random_pacman_start=True,
-            show_pacman=False,
-            episodes=10,
-            delay=0,
-            fps=1000,
-            output=False,
-        )
-
-        print(f"Final evaluation score for {config_name}: {score:.4f}")
+    results_2 = evaluate_random_start_same_size_map(
+        model_path,
+        spec,
+        episodes=episodes,
+        show_pacman=True,
+        output=True,
+        delay=0,
+        fps=1000,
+    )
+    results_3 = evaluate_cross_size(
+        model_path,
+        spec,
+        target_sizes=(4, 8, 12),
+        episodes_per_size=episodes,
+        show_pacman=True,
+        output=True,
+        delay=0,
+        fps=1000,
+    )
+    final_score = (results_1 + results_2 + sum(results_3.values())) / (2 + len(results_3))
+    print("results_1 (full same size):", results_1)
+    print("results_2 (random same size):", results_2)
+    print("results_3 (cross size):", results_3)
+    print(f"Final evaluation score: {final_score:.2f}")
