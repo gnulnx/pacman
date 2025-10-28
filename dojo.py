@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """
 Top-level Dojo command-line interface.
 
@@ -9,7 +9,16 @@ or create an alias:
     alias dojo="python dojo.py"
 """
 
+import sys
+
 from dojo_cli.dojo_train import cli
 
-if __name__ == "__main__":
+
+def main() -> None:
+    """CLI entry point for Dojo."""
+    # Delegate to Click CLI
     cli()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
