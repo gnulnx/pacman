@@ -8,10 +8,12 @@ import sys  # noqa
 import time  # noqa
 from dataclasses import replace  # noqa
 
+import numpy as np  # noqa
 import torch  # noqa
 
 from dojo_agent import Agent  # noqa
 from dojo_train import preprocess_state  # noqa
+from failed_run_recorder import FailedRunRecorder  # noqa
 from pacman_env import (  # noqa
     ACTIONS,
     Config,
@@ -27,151 +29,32 @@ from pacman_env import (  # noqa
 # torch.manual_seed(seed)
 
 
-# def evaluate(
-#     model_path, maze_spec, episodes=5, delay=0.25, fps=100, random_pacman_start=False, show_pacman=False, output=True
-# ):
-#     # 1) Freeze the layout explicitly from the spec
-#     layout = tuple(generate_rect_layout(maze_spec))
-#     cfg = Config(maze_layout=layout)  # <- NOT maze_spec
-#     env = PacmanEnv(cfg, human_mode=False, headless=False)
-#     sample_state = preprocess_state(env.reset())
-#     agent = Agent(sample_state.shape, len(ACTIONS))
-#     agent.model.load_state_dict(torch.load(model_path, map_location="cpu"))
-#     agent.model.eval()
+# def visualize_failed_record(env, record, pause=True):
+#     """
+#     Visually confirm that a saved failure record can be reconstructed.
+#     This assumes pygame is still active and 'env' is a PacmanEnv instance.
+#     """
+#     state = record["final_state"]
 
-#     if output:
-#         print(f"🎯 Evaluating {model_path} on {maze_spec.width}x{maze_spec.height} maze...")
-#     total_reward = 0.0
-#     total_steps = 0
-#     for ep in range(episodes):
-#         if random_pacman_start:
-#             start_x = random.randint(0, spec.width - 1)
-#             start_y = random.randint(0, spec.height - 1)
-#             start_x = 1
-#             start_y = 1
-#             print("Randomizing Pacman start to:", (start_x, start_y))
-#             spec.pacman_start = (start_x, start_y)
+#     # --- Restore maze pellets ---
+#     env.maze.pellets = np.array(state["pellets"], dtype=np.uint8)
 
-#             # Reinit layout and env with new pacman start
-#             layout = tuple(generate_rect_layout(maze_spec))
-#             cfg = Config(maze_layout=layout, max_steps=200, fps=fps)
-#             env = PacmanEnv(cfg, human_mode=False, headless=False)
+#     # --- Restore Pac-Man ---
+#     env.pacman.position = tuple(state["pacman"])
 
-#             env.reset()
+#     # --- Restore ghosts (if any) ---
+#     for g, pos in zip(env.ghosts, state["ghosts"]):
+#         g.position = tuple(pos)
 
-#         state = preprocess_state(env.reset())
-#         done = False
-#         total_episode_reward = 0.0
-#         total_episode_steps = 0
-#         while not done:
-#             with torch.no_grad():
-#                 s = torch.tensor(state, dtype=torch.float32, device=agent.device).unsqueeze(0)
-#                 action = int(torch.argmax(agent.model(s)).item())
-#             next_state, reward, done, _ = env.step(action)
-#             state = preprocess_state(next_state)
-#             if show_pacman:
-#                 env.render("human")
-#             total_episode_reward += reward
-#             total_episode_steps += 1
+#     # --- Re-render the restored state ---
+#     env.render("human")
+#     print(f"🔍 Visualizing failed episode {record['episode']}")
+#     print(f"  Pellets remaining: {record['pellets_remaining']}")
+#     print(f"  Reward: {record['reward']:.2f} | Steps: {record['steps']}")
+#     print(f"  Failure reason: {record['failure_reason']}")
 
-#             time.sleep(delay)
-#         total_reward += total_episode_reward
-#         total_steps += total_episode_steps
-
-#         if output:
-#             print(f"Episode {ep}: total_reward={total_episode_reward:.2f} in {total_episode_steps} steps")
-#         time.sleep(0.5)
-
-#     avg_reward = total_reward / episodes
-#     avg_steps = total_steps / episodes
-
-#     if output:
-#         print(f"=== Average Reward over {episodes} episodes: {avg_reward:.2f} ===")
-#         print(f"=== Average Steps over {episodes} episodes: {avg_steps:.2f} ===")
-#     env.close()
-
-#     # return a sum of squares for avg_reward and avg_steps
-#     return avg_reward / (avg_steps)
-
-
-# def evaluate(
-#     model_path, maze_spec, episodes=5, delay=0.25, fps=100, random_pacman_start=False, show_pacman=False, output=True
-# ):
-#     # Work on a local copy so we don't mutate caller/global specs
-#     base_spec: MazeSpec = copy.deepcopy(maze_spec)
-
-#     # Build first env from the (possibly non-randomized) spec
-#     layout = tuple(generate_rect_layout(base_spec))
-#     cfg = Config(maze_layout=layout, fps=fps)  # use layout, not maze_spec
-#     env = PacmanEnv(cfg, human_mode=False, headless=not show_pacman)
-
-#     sample_state = preprocess_state(env.reset())
-#     agent = Agent(sample_state.shape, len(ACTIONS))
-#     agent.model.load_state_dict(torch.load(model_path, map_location="cpu"))
-#     agent.model.eval()
-
-#     if output:
-#         print(f"🎯 Evaluating {model_path} on {base_spec.width}x{base_spec.height} maze...")
-
-#     total_reward = 0.0
-#     total_steps = 0
-
-#     for ep in range(episodes):
-#         # For each episode, optionally randomize the pacman start ON THE SPEC WE'LL USE
-#         if random_pacman_start:
-#             start_x = random.randint(0, base_spec.width - 1)
-#             start_y = random.randint(0, base_spec.height - 1)
-#             start_x = 0
-#             start_y = 1
-#             if output:
-#                 print("Randomizing Pacman start to:", (start_x, start_y))
-#             ep_spec = replace(base_spec, pacman_start=(start_x, start_y))
-#         else:
-#             ep_spec = base_spec
-
-#         # Rebuild layout/env for this episode from the correct spec
-#         layout = tuple(generate_rect_layout(ep_spec))
-#         print("\n".join(layout))
-#         cfg = Config(maze_layout=layout, max_steps=200, fps=fps)
-#         # Close previous env before replacing
-#         env.close()
-#         env = PacmanEnv(cfg, human_mode=False, headless=not show_pacman)
-
-#         state = preprocess_state(env.reset())
-#         done = False
-#         total_episode_reward = 0.0
-#         total_episode_steps = 0
-
-#         while not done:
-#             with torch.no_grad():
-#                 s = torch.tensor(state, dtype=torch.float32, device=agent.device).unsqueeze(0)
-#                 action = int(torch.argmax(agent.model(s)).item())
-#             next_state, reward, done, _ = env.step(action)
-#             state = preprocess_state(next_state)
-#             if show_pacman:
-#                 env.render("human")
-#             total_episode_reward += reward
-#             total_episode_steps += 1
-#             time.sleep(delay)
-
-#         total_reward += total_episode_reward
-#         total_steps += total_episode_steps
-
-#         if output:
-#             print(f"Episode {ep}: total_reward={total_episode_reward:.2f} in {total_episode_steps} steps")
-#         time.sleep(0.5)
-
-#     avg_reward = total_reward / episodes
-#     avg_steps = total_steps / episodes
-
-#     if output:
-#         print(f"=== Average Reward over {episodes} episodes: {avg_reward:.2f} ===")
-#         print(f"=== Average Steps over {episodes} episodes: {avg_steps:.2f} ===")
-
-#     env.close()
-
-#     # Keep your current metric; guard against zero division just in case
-#     return avg_reward / (avg_steps if avg_steps != 0 else 1.0)
+#     if pause:
+#         input("🟡 Press Enter to continue...")
 
 
 def evaluate(
@@ -212,6 +95,9 @@ def evaluate(
 
     total_reward, total_steps, total_pellets_left = 0.0, 0, 0
 
+    run_name = os.path.basename(model_path)
+    recorder = FailedRunRecorder(run_name=run_name)
+
     for ep in range(episodes):
         # --- Derive episode-specific spec ---
         ep_spec = copy.deepcopy(base_spec)
@@ -221,8 +107,6 @@ def evaluate(
             start_x = random.randint(0, ep_spec.width - 1)
             start_y = random.randint(0, ep_spec.height - 1)
             ep_spec = replace(ep_spec, pacman_start=(start_x, start_y))
-            # if output:
-            #     print(f"  🎲 Pac-Man start: {(start_x, start_y)}")
 
         # (2) Randomize pellets if requested
         if randomize_pellets:
@@ -235,13 +119,9 @@ def evaluate(
                 if pos != ep_spec.pacman_start and pos not in pellets:
                     pellets.append(pos)
             ep_spec = replace(ep_spec, pellet_mode="custom", pellet_positions=pellets)
-            # if output:
-            #     print(f"  🍒 Randomized {len(pellets)} pellet(s): {pellets}")
 
         # --- Rebuild env for this episode ---
         layout = tuple(generate_rect_layout(ep_spec))
-        # if output:
-        #     print("\n".join(layout))
         cfg = Config(maze_layout=layout, max_steps=200, fps=fps)
         env.close()
         env = PacmanEnv(cfg, human_mode=False, headless=not show_pacman)
@@ -271,6 +151,21 @@ def evaluate(
         total_steps += total_episode_steps
         total_pellets_left += env.maze.pellets.sum()
 
+        if env.maze.pellets.sum() != 0:
+            # At this point we need to write/save the final layout to retrain on
+            recorder.record_failure(
+                episode=ep,
+                maze_spec=ep_spec,
+                final_state=env._get_state(),
+                reward=total_episode_reward,
+                steps=total_episode_steps,
+                pellets_remaining=int(env.maze.pellets.sum()),
+                failure_reason="pellets_remaining",
+            )
+            # visualize_failed_record(env, last_record)
+            recorder.save()
+            input("checkpoint (press Enter to continue)")
+
         if output:
             print(
                 f"  ✅ Episode {ep}: reward={total_episode_reward:.2f} steps={total_episode_steps} pellets_left={env.maze.pellets.sum()}"
@@ -295,7 +190,7 @@ def evaluate(
 if __name__ == "__main__":
     # Base directory containing all your stage runs
     run_dir = "runs"
-    run_name = "stage37"
+    run_name = "stage56"
 
     stage_path = os.path.join(run_dir, run_name)
     model_path = os.path.join(stage_path, "final_model.pt")
@@ -314,11 +209,11 @@ if __name__ == "__main__":
     # you only need the actual configured MazeSpec from the pickle to get width/height right.  And even then you might want to test an
     # 8x8 on a 4x4 just to see how well it generalizes.
     # For now just hardcode a few things to get the eval working.
-    num_pellets = 15
+    # num_pellets = 15
     # spec.pellet_density = 1
     # spec.pellet_mode = "custom"  # Override to full pellets for eval
-    spec.width = 4
-    spec.height = 4
+    # spec.width = 4
+    # spec.height = 4
     spec.pacman_start = (0, 0)
     results = evaluate(
         model_path,
@@ -327,7 +222,7 @@ if __name__ == "__main__":
         randomize_pellets=True,  # ✅ Random pellet layout each episode
         num_random_pellets=num_pellets,  # ✅ Vary pellet count
         show_pacman=True,
-        episodes=10,
+        episodes=1000,
         output=True,
         delay=0,
         fps=1000,
