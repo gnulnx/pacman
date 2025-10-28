@@ -34,9 +34,9 @@ def _estimate_max_reward(env: PacmanEnv) -> float:
 
 
 def save_state(
-    state_dict,
-    stage_name,
-    current_spec,
+    state_dict: dict,
+    stage_name: str,
+    current_spec: MazeSpec,
     pretrained_path,
     episodes,
     max_possible,
