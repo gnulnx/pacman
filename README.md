@@ -131,3 +131,9 @@ Ensure every row has the same length so the layout forms a clean rectangular gri
 - Extend `MazeSpec` or supply handcrafted layouts to shape more complex curricula.
 - Add smarter ghost policies or multiple ghost variations.
 - Use `record_trajectory` to capture state-action-reward tuples and seed imitation learning datasets.
+
+
+
+## DOJO
+
+```python dojo.py --help```

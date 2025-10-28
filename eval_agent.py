@@ -12,7 +12,7 @@ import numpy as np  # noqa
 import torch  # noqa
 
 from dojo_agent import Agent  # noqa
-from dojo_train import preprocess_state  # noqa
+from dojo_train_impl import preprocess_state  # noqa
 from failed_run_recorder import FailedRunRecorder  # noqa
 from pacman_env import (  # noqa
     ACTIONS,
