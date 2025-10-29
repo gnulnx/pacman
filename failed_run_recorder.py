@@ -1,10 +1,15 @@
 import json
 import os
+from contextlib import redirect_stdout
 from datetime import UTC, datetime
 from typing import Any, Dict
 
 import numpy as np
-import pygame
+
+with open(os.devnull, "w") as f, redirect_stdout(f):
+    import pygame
+
+    pygame.init()
 
 from pacman_env import Config, MazeSpec, PacmanEnv
 
@@ -30,6 +35,13 @@ class FailedRunRecorder:
         os.makedirs(save_dir, exist_ok=True)
         self.file_path = os.path.join(save_dir, f"{run_name}.jsonl")
         self._buffer = []
+
+    def load_failures(path: str) -> list[dict]:
+        """Utility to load all failure records from a .jsonl file."""
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"No failed run file at {path}")
+        with open(path) as f:
+            return [json.loads(line) for line in f if line.strip()]
 
     # ------------------------------------------------------------------
     # RECORD FAILURES
@@ -75,7 +87,7 @@ class FailedRunRecorder:
         return record
 
     # ------------------------------------------------------------------
-    def save(self):
+    def save(self, verbose=True):
         """Write buffered records to disk."""
         if not self._buffer:
             return
@@ -83,7 +95,9 @@ class FailedRunRecorder:
             for rec in self._buffer:
                 json.dump(rec, f)
                 f.write("\n")
-        print(f"💾 Saved {len(self._buffer)} failed runs to {self.file_path}")
+
+        if verbose:
+            print(f"💾 Saved {len(self._buffer)} failed runs to {self.file_path}")
         self._buffer.clear()
 
     # ------------------------------------------------------------------
