@@ -29,6 +29,7 @@ import os
 import pickle
 
 import click
+from jprint import jprint  # noqa
 
 from eval_agent import (  # noqa
     evaluate_cross_size,
@@ -41,7 +42,7 @@ from pacman_env import MazeSpec
 # ---------------------------------------------------------------------------
 # helper: single-model evaluation (with normalized scoring)
 # ---------------------------------------------------------------------------
-def _evaluate_single_model(model_path, episodes, delay, fps, device, num_pellets=None):
+def _evaluate_single_model(model_path, episodes, delay, fps, device, num_pellets=None, target_sizes=[(8, 8)]):
     """Worker process function for evaluating a single model file."""
     stage_dir = os.path.dirname(model_path)
     config_path = os.path.join(stage_dir, "config.pkl")
@@ -49,24 +50,21 @@ def _evaluate_single_model(model_path, episodes, delay, fps, device, num_pellets
         cfg = pickle.load(f)
     spec: MazeSpec = cfg["maze_spec"]
 
-    r1 = r2 = 1.0
     output = False
     show_pacman = False
+    delay = 0
     # num_pellets = 2
 
-    # --- run standard suite ---
-    # r1 = evaluate_full_model_random_pacman_start_same_size_map(
-    #     model_path, spec, episodes=episodes, delay=delay, fps=fps, device=device, output=output, show_pacman=show_pacman
-    # )
-    # r2 = evaluate_random_start_same_size_map(
-    #     model_path, spec, episodes=episodes, delay=delay, fps=fps, device=device, output=output, show_pacman=show_pacman
-    # )
+    if not num_pellets:
+        num_pellets = spec.width * spec.height // 8  # default to 12.5% density
 
-    r3 = evaluate_cross_size(
+    # target_sizes = [(4, 4), (8, 8)]
+
+    r = evaluate_cross_size(
         model_path,
         spec,
         episodes_per_size=episodes,
-        target_sizes=[8],
+        target_sizes=target_sizes,
         delay=delay,
         fps=fps,
         device=device,
@@ -74,9 +72,11 @@ def _evaluate_single_model(model_path, episodes, delay, fps, device, num_pellets
         show_pacman=show_pacman,
         num_pellets=num_pellets,
     )
-    print("Results - full:", r1, "rand:", r2, "cross-size:", r3)
-    base_score = (r1 + r2 + sum(r3.values())) / (2 + len(r3))
-    return (spec.width, spec.height), base_score, model_path
+    final_score = sum(r.values()) / len(r)
+    print(f"Results for pellets={num_pellets}(cross size):")
+    jprint(r)
+    print(f"Final evaluation score: {final_score:.2f}")
+    return (spec.width, spec.height), final_score, model_path
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +102,8 @@ def _evaluate_single_model(model_path, episodes, delay, fps, device, num_pellets
 @click.option("--top-n", default=10, help="Show only top N per maze size (default 10).")
 @click.option("--num-pellets", default=None, type=int, help="Number of pellets to use in evaluation.")
 @click.option("--ignore-files-like", default="", help="Ignore model files containing this string.")
-def eval_cmd(paths, episodes, delay, fps, models, device, procs, top_n, num_pellets, ignore_files_like):
+@click.option("--target-sizes", default="8x8", help="Comma-separated list of WxH sizes to evaluate (e.g., 8x8,10x10).")
+def eval_cmd(paths, episodes, delay, fps, models, device, procs, top_n, num_pellets, ignore_files_like, target_sizes):
     """
     Evaluate one or more trained Dojo models.
 
@@ -122,11 +123,11 @@ def eval_cmd(paths, episodes, delay, fps, models, device, procs, top_n, num_pell
         f.write(f"Checkpoint types: {', '.join(models)}\n")
         f.write(f"Episodes per test: {episodes}\n\n")
 
-    # --- collect all model paths ---
-    # derive model_ignores from ignore_files_like
-    # print("IGNORE FILES LIKE:", ignore_files_like)
-    # input()
+    target_sizes = [
+        tuple(int(dim) for dim in size_str.split("x")) for size_str in target_sizes.split(",") if "x" in size_str
+    ]
 
+    # --- collect all model paths ---
     model_ignores = ignore_files_like.split(",") if ignore_files_like else []
     model_files = []
     for p in paths:
@@ -161,7 +162,8 @@ def eval_cmd(paths, episodes, delay, fps, models, device, procs, top_n, num_pell
         output_path, "a"
     ) as f:
         futures = [
-            pool.submit(_evaluate_single_model, mp, episodes, delay, fps, device, num_pellets) for mp in model_files
+            pool.submit(_evaluate_single_model, mp, episodes, delay, fps, device, num_pellets, target_sizes)
+            for mp in model_files
         ]
         for future in concurrent.futures.as_completed(futures):
             try:
@@ -196,7 +198,9 @@ def eval_cmd(paths, episodes, delay, fps, models, device, procs, top_n, num_pell
         # Top 10 overall
         all_sorted = sorted(results, key=lambda x: x[1], reverse=True)[:10]
         f.write("🏆 Top 10 Overall Models\n")
+        print("🏆 Top 10 Overall Models")
         f.write("-----------------------\n")
+        print("-----------------------")
         top_paths = []
         for (w, h), sc, pth in all_sorted:
             label = f"{w}x{h}"

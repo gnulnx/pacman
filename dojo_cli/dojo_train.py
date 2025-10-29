@@ -12,7 +12,7 @@ def cli():
     pass
 
 
-@cli.command()
+@cli.command("train")
 @click.argument("curriculum", type=click.Choice(CURRICULA.keys()))
 @click.option("--episodes", default=5000, help="Max episodes per stage.")
 def train(curriculum, episodes):

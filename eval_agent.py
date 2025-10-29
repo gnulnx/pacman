@@ -10,6 +10,7 @@ from dataclasses import replace  # noqa
 
 import numpy as np  # noqa
 import torch  # noqa
+from jprint import jprint  # noqa
 
 from dojo_agent import Agent  # noqa
 from dojo_train_impl import preprocess_state  # noqa
@@ -27,136 +28,6 @@ from pacman_env import (  # noqa
 # random.seed(seed)
 # np.random.seed(seed)
 # torch.manual_seed(seed)
-
-
-# def evaluate(
-#     model_path: str,
-#     maze_spec: MazeSpec,
-#     episodes: int = 5,
-#     delay: float = 0.25,
-#     fps: int = 100,
-#     random_pacman_start: bool = False,
-#     randomize_pellets: bool = False,
-#     num_random_pellets: int = 1,
-#     show_pacman: bool = False,
-#     output: bool = True,
-#     device: str = "cpu",
-# ) -> float:
-#     """
-#     Evaluate a trained Pac-Man agent under various randomization modes.
-
-#     Modes:
-#       1. Spec-exact                      -> random_pacman_start=False, randomize_pellets=False
-#       2. Random Pac-Man start            -> random_pacman_start=True,  randomize_pellets=False
-#       3. Random Pac-Man + random pellets -> random_pacman_start=True,  randomize_pellets=True
-#          (num_random_pellets controls how many pellets are placed)
-#     """
-#     base_spec: MazeSpec = copy.deepcopy(maze_spec)
-
-#     # Build agent once
-#     initial_layout = tuple(generate_rect_layout(base_spec))
-#     env = PacmanEnv(Config(maze_layout=initial_layout, fps=fps), human_mode=False, headless=not show_pacman)
-#     sample_state = preprocess_state(env.reset())
-#     agent = Agent(sample_state.shape, len(ACTIONS), device=device)
-#     agent.model.load_state_dict(torch.load(model_path, map_location="cpu"))
-#     agent.model.eval()
-
-#     print("pellet count: ", env.maze.pellets.sum())
-
-#     if output:
-#         print(f"🎯 Evaluating {model_path} on {base_spec.width}x{base_spec.height} maze...")
-
-#     total_reward, total_steps, total_pellets_left = 0.0, 0, 0
-
-#     run_name = os.path.basename(model_path)
-#     recorder = FailedRunRecorder(run_name=run_name)
-
-#     for ep in range(episodes):
-#         # --- Derive episode-specific spec ---
-#         ep_spec = copy.deepcopy(base_spec)
-
-#         # (1) Randomize Pac-Man start
-#         if random_pacman_start:
-#             start_x = random.randint(0, ep_spec.width - 1)
-#             start_y = random.randint(0, ep_spec.height - 1)
-#             ep_spec = replace(ep_spec, pacman_start=(start_x, start_y))
-
-#         # (2) Randomize pellets if requested
-#         if randomize_pellets:
-#             pellets = []
-#             while len(pellets) < num_random_pellets:
-#                 pos = (
-#                     random.randint(0, ep_spec.width - 1),
-#                     random.randint(0, ep_spec.height - 1),
-#                 )
-#                 if pos != ep_spec.pacman_start and pos not in pellets:
-#                     pellets.append(pos)
-#             ep_spec = replace(ep_spec, pellet_mode="custom", pellet_positions=pellets)
-
-#         # --- Rebuild env for this episode ---
-#         layout = tuple(generate_rect_layout(ep_spec))
-#         cfg = Config(maze_layout=layout, max_steps=200, fps=fps)
-#         env.close()
-#         env = PacmanEnv(cfg, human_mode=False, headless=not show_pacman)
-
-#         # Render first frame right after reset (so Pac-Man is visible before moving)
-#         state = preprocess_state(env.reset())
-#         if show_pacman:
-#             env.render("human")
-
-#         done = False
-#         total_episode_reward, total_episode_steps = 0.0, 0
-
-#         while not done:
-#             with torch.no_grad():
-#                 s = torch.tensor(state, dtype=torch.float32, device=agent.device).unsqueeze(0)
-#                 action = int(torch.argmax(agent.model(s)).item())
-#             next_state, reward, done, _ = env.step(action)
-#             # print(f"reward={reward} done={done}")
-#             state = preprocess_state(next_state)
-#             if show_pacman:
-#                 env.render("human")
-#             total_episode_reward += reward
-#             total_episode_steps += 1
-#             time.sleep(delay)
-
-#         total_reward += total_episode_reward
-#         total_steps += total_episode_steps
-#         total_pellets_left += env.maze.pellets.sum()
-
-#         if env.maze.pellets.sum() != 0:
-#             # At this point we need to write/save the final layout to retrain on
-#             recorder.record_failure(
-#                 env=env,
-#                 episode=ep,
-#                 maze_spec=ep_spec,
-#                 final_state=env._get_state(),
-#                 reward=total_episode_reward,
-#                 steps=total_episode_steps,
-#                 pellets_remaining=int(env.maze.pellets.sum()),
-#                 failure_reason="pellets_remaining",
-#             )
-#             recorder.save()
-
-#         if output:
-#             print(
-#                 f"  ✅ Episode {ep}: reward={total_episode_reward:.2f} steps={total_episode_steps} pellets_left={env.maze.pellets.sum()}"
-#             )
-#         time.sleep(0.25)
-
-#     avg_reward = total_reward / episodes
-#     avg_steps = total_steps / episodes
-#     avg_pellets_left = total_pellets_left / episodes
-
-#     if output:
-#         print(
-#             f"=== Average Reward: {avg_reward:.2f} | Average Steps: {avg_steps:.2f} | Average Pellets Left: {avg_pellets_left:.2f} ==="
-#         )
-
-#     env.close()
-
-#     # Simple efficiency metric (higher is better)
-#     return avg_reward / (avg_steps if avg_steps > 0 else 1.0)
 
 
 def evaluate(
@@ -346,7 +217,7 @@ def evaluate_random_start_same_size_map(
 def evaluate_cross_size(
     model_path: str,
     maze_spec: MazeSpec,
-    target_sizes: tuple[int, ...] = (4, 8, 12),
+    target_sizes: tuple[tuple[int, int], ...] = ((4, 4), (8, 8), (12, 12)),
     episodes_per_size: int = 5,
     delay: float = 0.0,
     fps: int = 200,
@@ -388,11 +259,11 @@ def evaluate_cross_size(
         print("🔍 Cross-size generalization evaluation")
         print("----------------------------------------")
 
-    for size in target_sizes:
+    for width, height in target_sizes:
         # Dynamically adjust maze spec for each test size
         test_spec = MazeSpec(
-            width=size,
-            height=size,
+            width=width,
+            height=height,
             include_ghosts=False,
             include_power_pellets=False,
             surround_walls=True,
@@ -421,10 +292,10 @@ def evaluate_cross_size(
             device=device,
         )
 
-        scores[size] = score
+        scores[f"{width}x{height}"] = score
 
         if output:
-            print(f"  ✅ {size}x{size} → Score: {score:.4f}")
+            print(f"  ✅ {width}x{height} → Score: {score:.4f}")
 
     if output:
         print("----------------------------------------")
@@ -438,8 +309,9 @@ if __name__ == "__main__":
     run_dir = "runs/failure_mix/"
     run_name = "best_overall"
 
+    # runs/stage26/final_model.pt
     run_dir = "runs"
-    run_name = "stage1"
+    run_name = "stage27"
     # "saved_models/0.7352_stage3_best_model.pt"
 
     stage_path = os.path.join(run_dir, run_name)
@@ -458,33 +330,15 @@ if __name__ == "__main__":
     print("Number of random pellets for evaluation:", num_pellets)
 
     episodes = 20
-    results_1 = results_2 = results_3 = 0
-    num_pellets = 2
+    results = 0
+    num_pellets = 20
 
-    # Turn this back on when have trained with larger densities
-    # results_1 = evaluate_full_model_random_pacman_start_same_size_map(
-    #     model_path,
-    #     spec,
-    #     episodes=episodes,
-    #     show_pacman=True,
-    #     output=True,
-    #     delay=0,
-    #     fps=1000,
-    # )
-    results_2 = evaluate_random_start_same_size_map(
+    target_sizes = [(8, 8), (10, 10), (12, 12)]
+
+    results = evaluate_cross_size(
         model_path,
         spec,
-        episodes=episodes,
-        show_pacman=True,
-        output=True,
-        delay=0.0,
-        fps=1000,
-        num_pellets=num_pellets,
-    )
-    results_3 = evaluate_cross_size(
-        model_path,
-        spec,
-        target_sizes=(4, 8, 12),
+        target_sizes=target_sizes,
         episodes_per_size=episodes,
         show_pacman=True,
         output=True,
@@ -492,8 +346,8 @@ if __name__ == "__main__":
         fps=1000,
         num_pellets=num_pellets,
     )
-    final_score = (results_1 + results_2 + sum(results_3.values())) / (2 + len(results_3))
-    print("results_1 (full same size):", results_1)
-    print("results_2 (random same size):", results_2)
-    print("results_3 (cross size):", results_3)
+    final_score = sum(results.values()) / len(results)
+    # final_score = (results_1 + results_2 + sum(results_3.values())) / (2 + len(results_3))
+    print(f"Results for pellets={num_pellets}(cross size):")
+    jprint(results)
     print(f"Final evaluation score: {final_score:.2f}")
