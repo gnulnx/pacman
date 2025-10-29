@@ -33,7 +33,7 @@ class DQN(nn.Module):
 
 
 class Agent:
-    def __init__(self, obs_shape, n_actions, lr=1e-3, gamma=0.99, device=None):
+    def __init__(self, obs_shape, n_actions, lr=1e-3, gamma=0.99, device=None, memory_size=10000):
         # ✅ auto-detect best device
         if not device:
             if torch.backends.mps.is_available():
@@ -51,7 +51,7 @@ class Agent:
         self.target.load_state_dict(self.model.state_dict())
         self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
         self.gamma = gamma
-        self.memory = deque(maxlen=10000)
+        self.memory = deque(maxlen=memory_size)
         self.n_actions = n_actions
         self.lr = lr
 
@@ -64,6 +64,7 @@ class Agent:
             return int(torch.argmax(qvals).item())
 
     def remember(self, transition):
+        # dequeu setup with maxlen.  So we pop old ones automatically if self.memory > maxlen
         self.memory.append(transition)
 
     def replay(self, batch_size=64):
@@ -79,6 +80,9 @@ class Agent:
 
         q_values = self.model(states).gather(1, actions)
         next_q = self.target(next_states).max(1)[0].unsqueeze(1)
+
+        # This is the Bellman target you’ve seen conceptually:
+        # yi​=ri​+γ(1−donei​)a′max​Qtarget​(si′​,a′)
         target = rewards + (1 - dones) * self.gamma * next_q
 
         loss = nn.functional.mse_loss(q_values, target)
