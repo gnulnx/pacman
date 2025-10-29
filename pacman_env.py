@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import os
 import random
 from collections import deque
+from contextlib import redirect_stdout
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-import pygame
+
+with open(os.devnull, "w") as f, redirect_stdout(f):
+    import pygame
+
+    pygame.init()
 
 GridPos = Direction = Tuple[int, int]
 
@@ -32,96 +38,6 @@ class MazeSpec:
     ghost_positions: Optional[List[GridPos]] = None
     pacman_start: GridPos = (0, 0)  # interior coordinates (0,0) top-left
     random_seed: Optional[int] = None
-
-
-# def generate_rect_layout(spec: MazeSpec) -> List[str]:
-#     """Create a simple rectangular maze from the provided specification."""
-#     rng = random.Random(spec.random_seed)
-#     width, height = spec.width, spec.height
-#     grid_width = width + 2 if spec.surround_walls else width
-#     grid_height = height + 2 if spec.surround_walls else height
-
-#     def to_grid(pos: GridPos) -> GridPos:
-#         x, y = pos
-#         if spec.surround_walls:
-#             return (x + 1, y + 1)
-#         return pos
-
-#     rows = (
-#         [["#"] * grid_width for _ in range(grid_height)]
-#         if spec.surround_walls
-#         else [[" "] * grid_width for _ in range(grid_height)]
-#     )
-#     for y in range(height):
-#         for x in range(width):
-#             gx, gy = to_grid((x, y))
-#             rows[gy][gx] = " "
-
-#     pellets: List[GridPos] = []
-#     if spec.include_pellets:
-#         interior_coords = [(x, y) for y in range(height) for x in range(width)]
-#         start = spec.pacman_start
-#         interior_coords = [pos for pos in interior_coords if pos != start]
-#         if spec.pellet_mode == "full":
-#             for pos in interior_coords:
-#                 if spec.pellet_density >= 1.0 or rng.random() <= spec.pellet_density:
-#                     pellets.append(pos)
-#         elif spec.pellet_mode == "single":
-#             if spec.pellet_positions:
-#                 pellets.extend(spec.pellet_positions)
-#             else:
-#                 pellets.append((width - 1, height - 1))
-#         elif spec.pellet_mode == "stripe_h":
-#             for y in range(height):
-#                 if y % 2 == 0:
-#                     for x in range(width):
-#                         pellets.append((x, y))
-#         elif spec.pellet_mode == "stripe_v":
-#             for x in range(width):
-#                 if x % 2 == 0:
-#                     for y in range(height):
-#                         pellets.append((x, y))
-#         elif spec.pellet_mode == "l_shape":
-#             for x in range(width):
-#                 pellets.append((x, 0))
-#             for y in range(height):
-#                 pellets.append((0, y))
-#         elif spec.pellet_mode == "custom" and spec.pellet_positions:
-#             pellets.extend(spec.pellet_positions)
-#     pellets = [pos for pos in pellets if 0 <= pos[0] < width and 0 <= pos[1] < height]
-
-#     power_positions: List[GridPos] = []
-#     if spec.include_power_pellets:
-#         if spec.power_pellet_positions:
-#             power_positions = spec.power_pellet_positions
-#         else:
-#             power_positions = [(0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)]
-#     power_positions = [pos for pos in power_positions if 0 <= pos[0] < width and 0 <= pos[1] < height]
-
-#     pacman_grid = to_grid(spec.pacman_start)
-#     rows[pacman_grid[1]][pacman_grid[0]] = "P"
-
-#     unique_pellets = set(pellets)
-#     for pos in unique_pellets:
-#         gx, gy = to_grid(pos)
-#         rows[gy][gx] = "."
-#     for pos in power_positions:
-#         gx, gy = to_grid(pos)
-#         rows[gy][gx] = "o"
-
-#     ghost_positions = spec.ghost_positions or []
-#     if spec.include_ghosts and not ghost_positions:
-#         default = (width - 1, height - 1)
-#         if default != spec.pacman_start:
-#             ghost_positions = [default]
-#         else:
-#             ghost_positions = [(width // 2, height // 2)]
-#     for pos in ghost_positions:
-#         if 0 <= pos[0] < width and 0 <= pos[1] < height:
-#             gx, gy = to_grid(pos)
-#             rows[gy][gx] = "G"
-
-#     return ["".join(row) for row in rows]
 
 
 def generate_rect_layout(spec: MazeSpec) -> List[str]:
