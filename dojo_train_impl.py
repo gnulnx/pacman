@@ -43,15 +43,19 @@ def save_state(
     success_rate,
     avg,
     std,
+    output_dir=None,
     model_name="final_model.pt",
 ):
     """
     Save the model state and training configuration to disk.
     """
-    os.makedirs(f"runs/{stage_name}", exist_ok=True)
-    torch.save(state_dict, f"runs/{stage_name}/{model_name}")
+    if not output_dir:
+        output_dir = f"runs/{stage_name}"
+
+    os.makedirs(output_dir, exist_ok=True)
+    torch.save(state_dict, f"{output_dir}/{model_name}")
     #  Also save input params as a pickle for easy loading later
-    with open(f"runs/{stage_name}/config.pkl", "wb") as f:
+    with open(f"{output_dir}/config.pkl", "wb") as f:
         pickle.dump(
             {
                 "maze_spec": current_spec,
@@ -76,6 +80,7 @@ def train_stage(
     eps_start=1.0,
     eps_end=0.1,
     eps_decay=10000,
+    agent: Optional[Agent] = None,  # only pass agent if you maze_spec is the same size
 ):
     """
     Train a DQN agent on a given Pac-Man maze with robust convergence detection.
@@ -94,7 +99,16 @@ def train_stage(
     sample_state = preprocess_state(env.reset())
     obs_shape = sample_state.shape
     n_actions = len(ACTIONS)
-    agent = Agent(obs_shape, n_actions)
+
+    # --- Setup the agent with appropriate memory size ---
+    if agent is None:
+        buffer_size = 2000 if current_spec.width <= 4 else 100000
+        agent = Agent(obs_shape, n_actions, memory_size=buffer_size)
+
+    # Inside train_stage, after loading pretrained weights:
+    # for name, param in agent.model.named_parameters():
+    #     if "conv" in name:
+    #         param.requires_grad = False
 
     # --- Optional weight transfer ---
     if pretrained_path and os.path.exists(pretrained_path):
@@ -102,15 +116,27 @@ def train_stage(
         agent.target.load_state_dict(agent.model.state_dict())
         print(f"✅ Loaded pretrained weights from {pretrained_path}")
 
+        # 🧊 Optional: freeze conv layers if model was trained on a larger maze
+        try:
+            # detect smaller environment vs pretrained map size
+            with open(os.path.join(os.path.dirname(pretrained_path), "config.pkl"), "rb") as f:
+                prev_cfg = pickle.load(f)
+            prev_spec = prev_cfg.get("maze_spec", None)
+
+            if prev_spec and (prev_spec.width > current_spec.width or prev_spec.height > current_spec.height):
+                print(f"🧠 Detected smaller maze ({current_spec.width}x{current_spec.height}); freezing conv layers")
+                for name, param in agent.model.named_parameters():
+                    if "conv" in name:
+                        param.requires_grad = False
+        except Exception as e:
+            print(f"⚠️ Could not read previous spec for auto-freeze: {e}")
+
         # 🧠 Reset optimizer & exploration to adapt to new stage dynamics
+        # Since you are reusing the agent it's important to reset optimizer state
         agent.optimizer = torch.optim.Adam(agent.model.parameters(), lr=agent.lr)  # clear old momentum
         agent.eps_start = 0.5  # restart exploration higher for the new stage
         agent.eps = agent.eps_start
     agent.steps = 0  # reset epsilon decay counter
-
-    # --- Replay buffer scaling ---
-    buffer_size = 2000 if current_spec.width <= 4 else 5000
-    agent.memory = agent.memory.__class__(maxlen=buffer_size)
 
     os.makedirs(f"runs/{stage_name}", exist_ok=True)
     print(f"🚀 Starting training for {stage_name} ({current_spec.width}x{current_spec.height})")
@@ -237,7 +263,7 @@ def train_stage(
                 #     )
 
                 #     env.close()
-                #     return
+                #     return agent
 
                 # 2️⃣ Plateaued: high performance but no improvement for a while
                 if success_rate >= 0.90 and std <= 0.05 * max_possible and no_improve_counter > 20:
@@ -258,7 +284,7 @@ def train_stage(
                     )
 
                     env.close()
-                    return
+                    return agent
 
                 # 3️⃣ Converged mean: flat trend with low variability
                 if avg_change < 0.005 and std <= 0.03 * max_possible:
@@ -277,7 +303,7 @@ def train_stage(
                     )
 
                     env.close()
-                    return
+                    return agent
 
         # Prepare next episode (potentially with fresh layout)
         if spec_sampler is not None:
@@ -312,6 +338,7 @@ def train_stage(
         std,
         model_name="final_model.pt",
     )
+    return agent
 
 
 def _single_pellet_position(width: int, height: int, start: tuple[int, int]) -> tuple[int, int]:
@@ -360,46 +387,6 @@ def _train_curriculum_for_grid(
             stage_path = f"runs/{stage_name}/final_model.pt"
             stage_counter += 1
     return stage_counter, stage_path
-
-
-# def _random_episode_sampler(
-#     base_spec: MazeSpec, *, randomize_pacman: bool, randomize_single_target: bool
-# ) -> Callable[[], MazeSpec]:
-#     """
-#     Build a callable that returns fresh MazeSpecs with randomized starts/pellets each episode.
-#     Each call will return a new maze spec with randomized Pac-Man start position and/or single pellet position.
-
-#     """
-#     coords = [(x, y) for x in range(base_spec.width) for y in range(base_spec.height)]
-
-#     def sampler() -> MazeSpec:
-#         pacman_start = base_spec.pacman_start
-#         if randomize_pacman:
-#             pacman_start = random.choice(coords)
-
-#         pellet_positions = base_spec.pellet_positions
-#         if base_spec.pellet_mode == "single":
-#             if randomize_single_target:
-#                 candidates = [pos for pos in coords if pos != pacman_start]
-#                 if candidates:
-#                     pellet_positions = [random.choice(candidates)]
-#                 else:
-#                     pellet_positions = [pacman_start]
-#             else:
-#                 if pellet_positions and pellet_positions[0] == pacman_start:
-#                     candidates = [pos for pos in coords if pos != pacman_start]
-#                     if candidates:
-#                         pellet_positions = [random.choice(candidates)]
-#         # For full or other modes, pellet placement is implied by mode; keep existing configuration.
-
-#         return replace(
-#             base_spec,
-#             pacman_start=pacman_start,
-#             pellet_positions=pellet_positions,
-#             random_seed=random.randint(0, 10**9),
-#         )
-
-#     return sampler
 
 
 def _random_episode_sampler(
@@ -504,190 +491,216 @@ def _random_episode_sampler(
 if __name__ == "__main__":
 
     stage = 1
-    prev_final = None
+    # prev_final = None
+    # # prev_final = "saved_models/0.7352_stage3_best_model.pt"
 
-    # === 2x2 curriculum – single pellet enumeration ===
-    two_by_two_coords = [(x, y) for x in range(2) for y in range(2)]
-    init = True
-    for start_x, start_y in two_by_two_coords:
-        for pellet_x, pellet_y in two_by_two_coords:
-            if (start_x, start_y) == (pellet_x, pellet_y):
-                continue
-            stage_name = f"stage{stage}"
-            maze_spec = MazeSpec(
-                width=2,
-                height=2,
-                include_ghosts=False,
-                pellet_mode="single",
-                pacman_start=(start_x, start_y),
-                pellet_positions=[(pellet_x, pellet_y)],
-                include_power_pellets=False,
-                surround_walls=True,
-            )
-            print(
-                f"\n=== Training {stage_name} [2x2 | single] (start={start_x},{start_y} → pellet={pellet_x},{pellet_y}) ==="
-            )
-            train_stage(
-                stage_name,
-                maze_spec,
-                pretrained_path=prev_final,
-                eps_start=0.9 if not init else 1.0,
-                eps_end=0.05,
-            )
-            init = False
-            prev_final = f"runs/{stage_name}/final_model.pt"
-            stage += 1
+    # # === 2x2 curriculum – single pellet enumeration ===
+    # two_by_two_coords = [(x, y) for x in range(2) for y in range(2)]
+    # init = True
+    # for start_x, start_y in two_by_two_coords:
+    #     for pellet_x, pellet_y in two_by_two_coords:
+    #         if (start_x, start_y) == (pellet_x, pellet_y):
+    #             continue
+    #         stage_name = f"stage{stage}"
+    #         maze_spec = MazeSpec(
+    #             width=2,
+    #             height=2,
+    #             include_ghosts=False,
+    #             pellet_mode="single",
+    #             pacman_start=(start_x, start_y),
+    #             pellet_positions=[(pellet_x, pellet_y)],
+    #             include_power_pellets=False,
+    #             surround_walls=True,
+    #         )
+    #         print(
+    #             f"\n=== Training {stage_name} [2x2 | single] (start={start_x},{start_y} → pellet={pellet_x},{pellet_y}) ==="
+    #         )
+    #         train_stage(
+    #             stage_name,
+    #             maze_spec,
+    #             pretrained_path=prev_final,
+    #             eps_start=0.9 if not init else 1.0,
+    #             eps_end=0.05,
+    #         )
+    #         init = False
+    #         prev_final = f"runs/{stage_name}/final_model.pt"
+    #         stage += 1
 
-    # === 2x2 curriculum – full pellets (4 starts) ===
-    for start_x, start_y in two_by_two_coords:
-        stage_name = f"stage{stage}"
-        maze_spec = MazeSpec(
-            width=2,
-            height=2,
-            include_ghosts=False,
-            pellet_mode="full",
-            pacman_start=(start_x, start_y),
-            include_power_pellets=False,
-            surround_walls=True,
-        )
-        print(f"\n=== Training {stage_name} [2x2 | full] (start={start_x},{start_y}) ===")
-        train_stage(
-            stage_name,
-            maze_spec,
-            pretrained_path=prev_final,
-            eps_start=0.8,
-            eps_end=0.05,
-        )
-        prev_final = f"runs/{stage_name}/final_model.pt"
-        stage += 1
+    # # === 2x2 curriculum – full pellets (4 starts) ===
+    # for start_x, start_y in two_by_two_coords:
+    #     stage_name = f"stage{stage}"
+    #     maze_spec = MazeSpec(
+    #         width=2,
+    #         height=2,
+    #         include_ghosts=False,
+    #         pellet_mode="full",
+    #         pacman_start=(start_x, start_y),
+    #         include_power_pellets=False,
+    #         surround_walls=True,
+    #     )
+    #     print(f"\n=== Training {stage_name} [2x2 | full] (start={start_x},{start_y}) ===")
+    #     train_stage(
+    #         stage_name,
+    #         maze_spec,
+    #         pretrained_path=prev_final,
+    #         eps_start=0.8,
+    #         eps_end=0.05,
+    #     )
+    #     prev_final = f"runs/{stage_name}/final_model.pt"
+    #     stage += 1
 
-    # === 4x4 curricula 1: full pellets with varied starts ===
-    coords = [(x, y) for x in range(4) for y in range(4)]
-    for start_x, start_y in coords:
-        stage_name = f"stage{stage}"
-        maze_spec = MazeSpec(
-            width=4,
-            height=4,
-            include_ghosts=False,
-            pellet_mode="full",
-            pacman_start=(start_x, start_y),
-            include_power_pellets=False,
-            surround_walls=True,
-        )
-        print(f"\n=== Training {stage_name} [4x4 | full] (start={start_x},{start_y}) ===")
-        train_stage(
-            stage_name,
-            maze_spec,
-            pretrained_path=prev_final,
-            eps_start=0.7,
-            eps_end=0.05,
-        )
-        prev_final = f"runs/{stage_name}/final_model.pt"
-        stage += 1
+    # # === 4x4 curricula 1: full pellets with varied starts ===
+    # coords = [(x, y) for x in range(4) for y in range(4)]
+    # for start_x, start_y in coords:
+    #     stage_name = f"stage{stage}"
+    #     maze_spec = MazeSpec(
+    #         width=4,
+    #         height=4,
+    #         include_ghosts=False,
+    #         pellet_mode="full",
+    #         pacman_start=(start_x, start_y),
+    #         include_power_pellets=False,
+    #         surround_walls=True,
+    #     )
+    #     print(f"\n=== Training {stage_name} [4x4 | full] (start={start_x},{start_y}) ===")
+    #     train_stage(
+    #         stage_name,
+    #         maze_spec,
+    #         pretrained_path=prev_final,
+    #         eps_start=0.7,
+    #         eps_end=0.05,
+    #     )
+    #     prev_final = f"runs/{stage_name}/final_model.pt"
+    #     stage += 1
 
-    # === 4x4 curricula 2: randomized single-pellet rehearsal ===
-    single_spec_4x4 = MazeSpec(
-        width=4,
-        height=4,
-        pellet_mode="single",
-        include_ghosts=False,
-        surround_walls=True,
-    )
-    single_sampler = _random_episode_sampler(
-        single_spec_4x4,
-        randomize_pacman=True,
-        randomize_single_target=True,
-    )
-    stage_name = f"stage{stage}"
-    print(f"\n=== Training {stage_name} [4x4 | single | **random episodes**] ===")
-    train_stage(
-        stage_name,
-        single_spec_4x4,
-        pretrained_path=prev_final,
-        spec_sampler=single_sampler,
-        eps_start=0.8,
-        eps_end=0.05,
-    )
-    prev_final = f"runs/{stage_name}/final_model.pt"
-    stage += 1
+    # # === 4x4 curricula 2: randomized single-pellet rehearsal ===
+    # single_spec_4x4 = MazeSpec(
+    #     width=4,
+    #     height=4,
+    #     pellet_mode="single",
+    #     include_ghosts=False,
+    #     surround_walls=True,
+    # )
+    # single_sampler = _random_episode_sampler(
+    #     single_spec_4x4,
+    #     randomize_pacman=True,
+    #     randomize_single_target=True,
+    # )
+    # stage_name = f"stage{stage}"
+    # print(f"\n=== Training {stage_name} [4x4 | single | **random episodes**] ===")
+    # train_stage(
+    #     stage_name,
+    #     single_spec_4x4,
+    #     pretrained_path=prev_final,
+    #     spec_sampler=single_sampler,
+    #     eps_start=0.8,
+    #     eps_end=0.05,
+    # )
+    # prev_final = f"runs/{stage_name}/final_model.pt"
+    # stage += 1
 
-    # === 4x4 curricula 3: random varied pellet density ===
-    density_spec_4x4 = MazeSpec(
-        width=4,
-        height=4,
-        pellet_mode="custom",
-        include_ghosts=False,
-        surround_walls=True,
-    )
-    density_sampler = _random_episode_sampler(
-        density_spec_4x4,
-        randomize_pacman=True,
-        pellet_density=0.25,
-    )
-    stage_name = f"stage{stage}"
-    print(f"\n=== Training {stage_name} [4x4 | custom | **random density 25%**] ===")
-    train_stage(
-        stage_name,
-        density_spec_4x4,
-        pretrained_path=prev_final,
-        spec_sampler=density_sampler,
-        eps_start=0.8,
-        eps_end=0.05,
-    )
-    prev_final = f"runs/{stage_name}/final_model.pt"
-    stage += 1
+    # # === 4x4 curricula 3: random varied pellet density ===
+    # density_spec_4x4 = MazeSpec(
+    #     width=4,
+    #     height=4,
+    #     pellet_mode="custom",
+    #     include_ghosts=False,
+    #     surround_walls=True,
+    # )
+    # density_sampler = _random_episode_sampler(
+    #     density_spec_4x4,
+    #     randomize_pacman=True,
+    #     pellet_density=0.25,
+    # )
+    # stage_name = f"stage{stage}"
+    # print(f"\n=== Training {stage_name} [4x4 | custom | **random density 25%**] ===")
+    # train_stage(
+    #     stage_name,
+    #     density_spec_4x4,
+    #     pretrained_path=prev_final,
+    #     spec_sampler=density_sampler,
+    #     eps_start=0.8,
+    #     eps_end=0.05,
+    # )
+    # prev_final = f"runs/{stage_name}/final_model.pt"
+    # stage += 1
 
-    # === 4x4 curricula 4: randomized full-pellet rehearsal ===
-    review_full_spec = MazeSpec(
-        width=4,
-        height=4,
-        include_ghosts=False,
-        pellet_mode="full",
-        include_power_pellets=False,
-        surround_walls=True,
-    )
-    full_sampler = _random_episode_sampler(
-        review_full_spec,
-        randomize_pacman=True,
-    )
-    stage_name = f"stage{stage}"
-    print(f"\n=== Training {stage_name} [4x4 | full | **random episodes**] ===")
-    train_stage(
-        stage_name,
-        review_full_spec,
-        pretrained_path=prev_final,
-        spec_sampler=full_sampler,
-        eps_start=0.6,
-        eps_end=0.10,
-    )
-    prev_final = f"runs/{stage_name}/final_model.pt"
-    stage += 1
+    # # === 4x4 curricula 4: randomized full-pellet rehearsal ===
+    # review_full_spec = MazeSpec(
+    #     width=4,
+    #     height=4,
+    #     include_ghosts=False,
+    #     pellet_mode="full",
+    #     include_power_pellets=False,
+    #     surround_walls=True,
+    # )
+    # full_sampler = _random_episode_sampler(
+    #     review_full_spec,
+    #     randomize_pacman=True,
+    # )
+    # stage_name = f"stage{stage}"
+    # print(f"\n=== Training {stage_name} [4x4 | full | **random episodes**] ===")
+    # train_stage(
+    #     stage_name,
+    #     review_full_spec,
+    #     pretrained_path=prev_final,
+    #     spec_sampler=full_sampler,
+    #     eps_start=0.6,
+    #     eps_end=0.10,
+    # )
+    # prev_final = f"runs/{stage_name}/final_model.pt"
+    # stage += 1
 
-    print("✅ 4x4 phases complete. Last model:", prev_final)
+    # print("✅ 4x4 phases complete. Last model:", prev_final)
 
     # === 8x8 curricula ===
-    stage, prev_final = _train_curriculum_for_grid(
-        stage,
-        prev_final,
-        size=8,
-        subset_length=20,
-        modes=["full"],
-        eps_start=0.5,
-        eps_end=0.05,
-    )
+    prev_final = "saved_models/0.7352_stage3_best_model.pt"
+    # stage, prev_final = _train_curriculum_for_grid(
+    #     stage,
+    #     prev_final,
+    #     size=8,
+    #     subset_length=20,
+    #     modes=["full"],
+    #     eps_start=0.5,
+    #     eps_end=0.05,
+    # )
 
     # === 8x8 random rehearsal (full) ===
+    agent = None
+    for density in [0.04, 0.05, 0.1, 0.2, 0.3, 0.4, 0.6, 0.8, 1.0]:
+        print("running density:", density)
+        sampler = _random_episode_sampler(
+            MazeSpec(width=8, height=8, pellet_mode="custom", surround_walls=True),
+            randomize_pacman=True,
+            pellet_density=density,
+        )
+        agent = train_stage(
+            f"stage{stage}",
+            MazeSpec(width=8, height=8, pellet_mode="custom", surround_walls=True),
+            pretrained_path=prev_final,
+            spec_sampler=sampler,
+            eps_start=0.5,
+            eps_end=0.05,
+            eps_decay=200000,
+            episodes=10000,
+            agent=agent,
+        )
+        prev_final = f"runs/stage{stage}/final_model.pt"
+        print("completed density:", density)
+        stage += 1
+
     review_full_spec_8 = MazeSpec(
         width=8,
         height=8,
         include_ghosts=False,
-        pellet_mode="full",
+        pellet_mode="custom",
         include_power_pellets=False,
         surround_walls=True,
     )
     full_sampler_8 = _random_episode_sampler(
         review_full_spec_8,
         randomize_pacman=True,
+        pellet_density=0.2,
     )
     stage_name = f"stage{stage}"
     print(f"\n=== Training {stage_name} [8x8 | full | **random episodes**] ===")
@@ -701,215 +714,3 @@ if __name__ == "__main__":
     )
     prev_final = f"runs/{stage_name}/final_model.pt"
     stage += 1
-
-
-# if __name__ == "__main__":
-
-#     stage = 1
-#     prev_final = None
-
-#     two_by_two_coords = [(x, y) for x in range(2) for y in range(2)]
-#     init = True
-#     # 2x2 curriculum – single pellet: enumerate every pacman/pellet pairing
-#     for start_x, start_y in two_by_two_coords:
-#         for pellet_x, pellet_y in two_by_two_coords:
-#             if (start_x, start_y) == (pellet_x, pellet_y):
-#                 continue
-#             stage_name = f"stage{stage}"
-#             maze_spec = MazeSpec(
-#                 width=2,
-#                 height=2,
-#                 include_ghosts=False,
-#                 pellet_mode="single",
-#                 pacman_start=(start_x, start_y),
-#                 pellet_positions=[(pellet_x, pellet_y)],
-#                 include_power_pellets=False,
-#                 surround_walls=True,
-#             )
-#             print(
-#                 f"\n=== Training {stage_name} [2x2 | single] "
-#                 f"(start={start_x},{start_y} → pellet={pellet_x},{pellet_y}) ==="
-#             )
-#             if init:
-#                 init = False
-#                 train_stage(stage_name, maze_spec, pretrained_path=prev_final)
-#             else:
-#                 train_stage(
-#                     stage_name,
-#                     maze_spec,
-#                     pretrained_path=prev_final,
-#                     eps_start=0.9,
-#                     eps_end=0.05,
-#                 )
-#             prev_final = f"runs/{stage_name}/final_model.pt"
-#             stage += 1
-
-#     # 2x2 curriculum – full pellet: sweep every pacman start
-#     for start_x, start_y in two_by_two_coords:
-#         stage_name = f"stage{stage}"
-#         maze_spec = MazeSpec(
-#             width=2,
-#             height=2,
-#             include_ghosts=False,
-#             pellet_mode="full",
-#             pacman_start=(start_x, start_y),
-#             include_power_pellets=False,
-#             surround_walls=True,
-#         )
-#         print(f"\n=== Training {stage_name} [2x2 | full] (start={start_x},{start_y}) ===")
-#         train_stage(
-#             stage_name,
-#             maze_spec,
-#             pretrained_path=prev_final,
-#             eps_start=0.8,
-#             eps_end=0.05,
-#         )
-#         prev_final = f"runs/{stage_name}/final_model.pt"
-#         stage += 1
-
-#     # 4x4 curricula 1: full pellets with varied pacman starts
-#     coords = [(x, y) for x in range(4) for y in range(4)]
-#     for start_x, start_y in coords:
-#         stage_name = f"stage{stage}"
-#         single_positions = None
-#         maze_spec = MazeSpec(
-#             width=4,
-#             height=4,
-#             include_ghosts=False,
-#             pellet_mode="full",
-#             pacman_start=(start_x, start_y),
-#             pellet_positions=single_positions,
-#             include_power_pellets=False,
-#             surround_walls=True,
-#         )
-#         print(
-#             f"\n=== Training {stage_name} [4x4 | mode=full] (start={start_x},{start_y}) pellet_positions={single_positions} ==="
-#         )
-#         train_stage(
-#             stage_name,
-#             maze_spec,
-#             pretrained_path=prev_final,
-#             eps_start=0.7,
-#             eps_end=0.05,
-#         )
-#         prev_final = f"runs/{stage_name}/final_model.pt"
-#         stage += 1
-
-#     # 4x4 curricula 2: random rehearsal runs (single pellet)
-#     single_spec = MazeSpec(
-#         width=4,
-#         height=4,
-#         pellet_mode="single",
-#         include_ghosts=False,
-#         surround_walls=True,
-#     )
-
-#     single_sampler = _random_episode_sampler(
-#         single_spec,
-#         randomize_pacman=True,
-#         randomize_single_target=True,  # crucial
-#     )
-#     stage_name = f"stage{stage}"
-
-#     train_stage(
-#         stage_name,
-#         single_spec,
-#         pretrained_path=prev_final,
-#         spec_sampler=single_sampler,
-#         eps_start=0.6,
-#         eps_end=0.05,
-#     )
-#     prev_final = f"runs/{stage_name}/final_model.pt"
-#     stage += 1
-
-#     # 4x4 curricula 3: random varied pellet density
-#     single_spec = MazeSpec(
-#         width=4,
-#         height=4,
-#         pellet_mode="custom",
-#         include_ghosts=False,
-#         surround_walls=True,
-#     )
-
-#     single_sampler = _random_episode_sampler(
-#         single_spec,
-#         randomize_pacman=True,
-#         pellet_density=0.25,
-#     )
-#     stage_name = f"stage{stage}"
-
-#     train_stage(
-#         stage_name,
-#         single_spec,
-#         pretrained_path=prev_final,
-#         spec_sampler=single_sampler,
-#         eps_start=0.5,
-#         eps_end=0.05,
-#     )
-#     prev_final = f"runs/{stage_name}/final_model.pt"
-#     stage += 1
-
-#     # 4x4 curricula 3: random episodes with full pellets
-#     review_full_spec = MazeSpec(
-#         width=4,
-#         height=4,
-#         include_ghosts=False,
-#         pellet_mode="full",
-#         include_power_pellets=False,
-#         surround_walls=True,
-#     )
-#     # full_sampler() will return a new MazeSpec each episode with randomized pacman start and full pellets
-#     full_sampler = _random_episode_sampler(
-#         review_full_spec,
-#         randomize_pacman=True,
-#         # randomize_single_target=True,
-#     )
-#     stage_name = f"stage{stage}"
-#     print(f"\n=== Training {stage_name} [4x4 | full | **random episodes**] ===")
-#     train_stage(
-#         stage_name,
-#         review_full_spec,
-#         pretrained_path=prev_final,
-#         spec_sampler=full_sampler,
-#         eps_start=0.4,
-#         eps_end=0.1,
-#     )
-#     prev_final = f"runs/{stage_name}/final_model.pt"
-#     stage += 1
-
-#     print("4x4 is done.  last model:", prev_final)
-
-#     # 8x8 curricula (single then full pellets)
-#     # This is still starting from epsilon=1
-#     stage, prev_final = _train_curriculum_for_grid(
-#         stage,
-#         prev_final,
-#         size=8,
-#         subset_length=20,
-#         modes=["full"],
-#         eps_start=0.3,
-#         eps_end=0.05,
-#     )
-
-#     # 8x8 random rehearsal runs (full)
-#     review_full_spec_8 = MazeSpec(
-#         width=8,
-#         height=8,
-#         include_ghosts=False,
-#         pellet_mode="full",
-#         include_power_pellets=False,
-#         surround_walls=True,
-#     )
-#     full_sampler_8 = _random_episode_sampler(review_full_spec_8, randomize_pacman=True, randomize_single_target=False)
-#     stage_name = f"stage{stage}"
-#     print(f"\n=== Training {stage_name} [8x8 | full | **random episodes**] ===")
-#     train_stage(
-#         stage_name,
-#         review_full_spec_8,
-#         pretrained_path=prev_final,
-#         spec_sampler=full_sampler_8,
-#         eps_start=0.20,
-#         eps_end=0.05,
-#     )
-#     prev_final = f"runs/{stage_name}/final_model.pt"
-#     stage += 1
