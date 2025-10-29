@@ -30,7 +30,7 @@ import pickle
 
 import click
 
-from eval_agent import (
+from eval_agent import (  # noqa
     evaluate_cross_size,
     evaluate_full_model_random_pacman_start_same_size_map,
     evaluate_random_start_same_size_map,
@@ -41,7 +41,7 @@ from pacman_env import MazeSpec
 # ---------------------------------------------------------------------------
 # helper: single-model evaluation (with normalized scoring)
 # ---------------------------------------------------------------------------
-def _evaluate_single_model(model_path, episodes, delay, fps, device):
+def _evaluate_single_model(model_path, episodes, delay, fps, device, num_pellets=None):
     """Worker process function for evaluating a single model file."""
     stage_dir = os.path.dirname(model_path)
     config_path = os.path.join(stage_dir, "config.pkl")
@@ -49,18 +49,34 @@ def _evaluate_single_model(model_path, episodes, delay, fps, device):
         cfg = pickle.load(f)
     spec: MazeSpec = cfg["maze_spec"]
 
+    r1 = r2 = 1.0
+    output = False
+    show_pacman = False
+    # num_pellets = 2
+
     # --- run standard suite ---
-    r1 = evaluate_full_model_random_pacman_start_same_size_map(
-        model_path, spec, episodes=episodes, delay=delay, fps=fps, device=device
+    # r1 = evaluate_full_model_random_pacman_start_same_size_map(
+    #     model_path, spec, episodes=episodes, delay=delay, fps=fps, device=device, output=output, show_pacman=show_pacman
+    # )
+    # r2 = evaluate_random_start_same_size_map(
+    #     model_path, spec, episodes=episodes, delay=delay, fps=fps, device=device, output=output, show_pacman=show_pacman
+    # )
+
+    r3 = evaluate_cross_size(
+        model_path,
+        spec,
+        episodes_per_size=episodes,
+        target_sizes=[8],
+        delay=delay,
+        fps=fps,
+        device=device,
+        output=output,
+        show_pacman=show_pacman,
+        num_pellets=num_pellets,
     )
-    r2 = evaluate_random_start_same_size_map(model_path, spec, episodes=episodes, delay=delay, fps=fps, device=device)
-    # r1 = r2 = 1.0
-    r3 = evaluate_cross_size(model_path, spec, episodes_per_size=episodes, delay=delay, fps=fps, device=device)
+    print("Results - full:", r1, "rand:", r2, "cross-size:", r3)
     base_score = (r1 + r2 + sum(r3.values())) / (2 + len(r3))
     return (spec.width, spec.height), base_score, model_path
-    # --- normalize by maze area (fair comparison) ---
-    normalized = base_score / max(1, (spec.width * spec.height) / 16)  # 4x4 baseline
-    return (spec.width, spec.height), normalized, model_path
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +100,9 @@ def _evaluate_single_model(model_path, episodes, delay, fps, device):
 )
 @click.option("--procs", default=4, help="Number of parallel processes.")
 @click.option("--top-n", default=10, help="Show only top N per maze size (default 10).")
-def eval_cmd(paths, episodes, delay, fps, models, device, procs, top_n):
+@click.option("--num-pellets", default=None, type=int, help="Number of pellets to use in evaluation.")
+@click.option("--ignore-files-like", default="", help="Ignore model files containing this string.")
+def eval_cmd(paths, episodes, delay, fps, models, device, procs, top_n, num_pellets, ignore_files_like):
     """
     Evaluate one or more trained Dojo models.
 
@@ -92,6 +110,7 @@ def eval_cmd(paths, episodes, delay, fps, models, device, procs, top_n):
         dojo eval runs/ --models best,final
         dojo eval runs/stage56/final_model.pt
         dojo eval runs/stage35/final_model.pt runs/stage30/best_model.pt --episodes 25 --device mps
+        dojo eval runs/ saved_models/0.7352_stage3_best_model.pt --models=best,final --device=cpu  --episodes=10 --procs=10 --num-pellets=3 --ignore-files-like=/best_model,fail
     """
     timestamp = datetime.datetime.now().strftime("%a %b %d %H:%M:%S %Y")
     models = [m.strip() for m in models.split(",") if m.strip()]
@@ -104,14 +123,27 @@ def eval_cmd(paths, episodes, delay, fps, models, device, procs, top_n):
         f.write(f"Episodes per test: {episodes}\n\n")
 
     # --- collect all model paths ---
+    # derive model_ignores from ignore_files_like
+    # print("IGNORE FILES LIKE:", ignore_files_like)
+    # input()
+
+    model_ignores = ignore_files_like.split(",") if ignore_files_like else []
     model_files = []
     for p in paths:
         if os.path.isdir(p):
             for root, _, files in os.walk(p):
                 for file in files:
+
+                    model_file = os.path.join(root, file)
+                    if any(ignore in model_file for ignore in model_ignores):
+                        print("Ignoring:", model_file)
+                        continue
                     if any(file == f"{m}_model.pt" for m in models):
                         model_files.append(os.path.join(root, file))
         elif p.endswith(".pt"):
+            if any(ignore in p for ignore in model_ignores):
+                print("Ignoring:", p)
+                continue
             model_files.append(p)
         else:
             print(f"⚠️ Skipping unsupported path: {p}")
@@ -121,12 +153,16 @@ def eval_cmd(paths, episodes, delay, fps, models, device, procs, top_n):
         return
 
     print(f"Evaluating {len(model_files)} model(s)...")
+    for mf in model_files:
+        print(" -", mf)
 
     results = []
     with concurrent.futures.ProcessPoolExecutor(max_workers=min(procs, len(model_files))) as pool, open(
         output_path, "a"
     ) as f:
-        futures = [pool.submit(_evaluate_single_model, mp, episodes, delay, fps, device) for mp in model_files]
+        futures = [
+            pool.submit(_evaluate_single_model, mp, episodes, delay, fps, device, num_pellets) for mp in model_files
+        ]
         for future in concurrent.futures.as_completed(futures):
             try:
                 res = future.result()
@@ -147,24 +183,32 @@ def eval_cmd(paths, episodes, delay, fps, models, device, procs, top_n):
 
     with open(output_path, "a") as f:
         f.write("\n📈 Sorted Results by Size:\n\n")
+        print("\n📈 Sorted Results by Size:\n")
         for (w, h), items in summary.items():
             f.write(f"{w}x{h}\n")
+            print(f"{w}x{h}")
             for sc, pth in sorted(items, key=lambda x: x[0], reverse=True)[:top_n]:
-                f.write(f"    {sc:8.4f}  {os.path.basename(os.path.dirname(pth))}/{os.path.basename(pth)}\n")
+                f.write(f"    {sc:8.4f}  {pth}\n")
+                print(f"    {sc:8.4f}  {pth}")
             f.write("\n")
+            print()
 
         # Top 10 overall
         all_sorted = sorted(results, key=lambda x: x[1], reverse=True)[:10]
         f.write("🏆 Top 10 Overall Models\n")
+        f.write("-----------------------\n")
         top_paths = []
         for (w, h), sc, pth in all_sorted:
             label = f"{w}x{h}"
-            f.write(f"    {label:<6} {sc:8.4f}  {os.path.basename(os.path.dirname(pth))}/{os.path.basename(pth)}\n")
+            f.write(f"    {label:<6} {sc:8.4f}  {pth}\n")
+            print(f"    {label:<6} {sc:8.4f}  {pth}")
             top_paths.append(pth)
 
         rerun_cmd = "dojo eval " + " ".join(top_paths) + " --models=best,final --device=cpu --procs=10 --episodes=25 "
         f.write("\n💡 Tip: To re-evaluate the top 10 with more episodes, run:\n")
         f.write(f"    {rerun_cmd}\n")
+        print("\n💡 Tip: To re-evaluate the top 10 with more episodes, run:\n")
+        print(f"    {rerun_cmd}\n")
 
     print(f"\n✅ Evaluation complete. Results written to {output_path}")
 
