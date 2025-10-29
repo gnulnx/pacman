@@ -264,7 +264,7 @@ def evaluate(
                 pellets_remaining=int(pellets_left),
                 failure_reason="pellets_remaining",
             )
-            recorder.save()
+            recorder.save(verbose=False)
 
         if output:
             print(f"  ✅ Ep{ep}: reward={ep_reward:.1f} steps={ep_steps} pellets_left={pellets_left}")
@@ -274,25 +274,6 @@ def evaluate(
     avg_pellets_left = total_pellets_left / episodes
     avg_pellets_start = total_pellets_start / episodes
     return max(0.0, 1.0 - (avg_pellets_left / max(avg_pellets_start, 1.0)))
-    env.close()
-
-    # --- Normalized efficiency metric ---
-    if normalize_by_size:
-        # completion ratio ∈ [0,1]
-        completion_ratio = max(0.0, 1.0 - (avg_pellets_left / max(total_pellets, 1)))
-        # reward per cell
-        reward_density = avg_reward / (maze_spec.width * maze_spec.height)
-        # combine normalized components
-        efficiency = (completion_ratio + reward_density) / 2.0
-    else:
-        # legacy metric
-        efficiency = avg_reward / (avg_steps if avg_steps > 0 else 1)
-
-    if output:
-        norm_label = "normalized" if normalize_by_size else "raw"
-        print(f"=== {norm_label} efficiency: {efficiency:.4f} ===")
-
-    return efficiency
 
 
 def evaluate_full_model_random_pacman_start_same_size_map(
@@ -364,7 +345,7 @@ def evaluate_random_start_same_size_map(
 
 def evaluate_cross_size(
     model_path: str,
-    base_spec: MazeSpec,
+    maze_spec: MazeSpec,
     target_sizes: tuple[int, ...] = (4, 8, 12),
     episodes_per_size: int = 5,
     delay: float = 0.0,
@@ -372,6 +353,7 @@ def evaluate_cross_size(
     show_pacman: bool = False,
     output: bool = True,
     device: str = "cpu",
+    num_pellets: int = None,
 ) -> dict[int, float]:
     """
     Evaluate a trained model on *different maze sizes* to measure cross-scale generalization.
@@ -417,10 +399,13 @@ def evaluate_cross_size(
             pellet_mode="custom",
         )
 
-        num_pellets = random.randint(1, (size * size) - 1)
+        max_pellets = (test_spec.width * test_spec.height) - 1
+
+        if num_pellets is None or num_pellets > max_pellets:
+            num_pellets = random.randint(1, max_pellets)
 
         if output:
-            print(f"⚙️  Testing {size}x{size} map with {num_pellets} random pellets...")
+            print(f"⚙️  Testing {test_spec.width}x{test_spec.height} map with {num_pellets} random pellets...")
 
         score = evaluate(
             model_path,
@@ -443,18 +428,24 @@ def evaluate_cross_size(
 
     if output:
         print("----------------------------------------")
-        print(f"🏁 Cross-size results: {scores}")
+        print(f"🏁 Cross-size results for : {scores}")
 
     return scores
 
 
 if __name__ == "__main__":
     # Base directory containing all your stage runs
+    run_dir = "runs/failure_mix/"
+    run_name = "best_overall"
+
     run_dir = "runs"
-    run_name = "stage37"
+    run_name = "stage1"
+    # "saved_models/0.7352_stage3_best_model.pt"
 
     stage_path = os.path.join(run_dir, run_name)
     model_path = os.path.join(stage_path, "final_model.pt")
+
+    # model_path = "saved_models/0.7352_stage3_best_model.pt"
     config_path = os.path.join(stage_path, "config.pkl")
 
     with open(config_path, "rb") as f:
@@ -466,25 +457,29 @@ if __name__ == "__main__":
     num_pellets = random.randint(1, (spec.width * spec.height) - 1)
     print("Number of random pellets for evaluation:", num_pellets)
 
-    episodes = 10
+    episodes = 20
+    results_1 = results_2 = results_3 = 0
+    num_pellets = 2
 
-    results_1 = evaluate_full_model_random_pacman_start_same_size_map(
-        model_path,
-        spec,
-        episodes=episodes,
-        show_pacman=True,
-        output=True,
-        delay=0,
-        fps=1000,
-    )
+    # Turn this back on when have trained with larger densities
+    # results_1 = evaluate_full_model_random_pacman_start_same_size_map(
+    #     model_path,
+    #     spec,
+    #     episodes=episodes,
+    #     show_pacman=True,
+    #     output=True,
+    #     delay=0,
+    #     fps=1000,
+    # )
     results_2 = evaluate_random_start_same_size_map(
         model_path,
         spec,
         episodes=episodes,
         show_pacman=True,
         output=True,
-        delay=0,
+        delay=0.0,
         fps=1000,
+        num_pellets=num_pellets,
     )
     results_3 = evaluate_cross_size(
         model_path,
@@ -495,6 +490,7 @@ if __name__ == "__main__":
         output=True,
         delay=0,
         fps=1000,
+        num_pellets=num_pellets,
     )
     final_score = (results_1 + results_2 + sum(results_3.values())) / (2 + len(results_3))
     print("results_1 (full same size):", results_1)
