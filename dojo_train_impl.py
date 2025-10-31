@@ -180,6 +180,8 @@ def train_stage(
     else:
         max_steps = current_spec.width * current_spec.height * 10  # simple heuristic
 
+    print("max_steps_per_episode:", max_steps)
+
     env = Env(
         Config(maze_spec=current_spec, max_steps=max_steps, fps=2000),
         human_mode=False,
@@ -338,7 +340,8 @@ def train_stage(
                 # Standard self replay
                 agent.replay(batch_size=replay_batch_size)
 
-            if render_this_episode:
+            if render_this_episode and not env.headless:
+                print("Rendering episode", ep)
                 env.render("human")
 
         # --- Reward tracking ---
