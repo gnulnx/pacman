@@ -33,6 +33,7 @@ from jprint import jprint  # noqa
 
 from eval_agent import (  # noqa
     evaluate_cross_size,
+    evaluate_curiosity_same_size,
     evaluate_full_model_random_pacman_start_same_size_map,
     evaluate_random_start_same_size_map,
 )
@@ -89,7 +90,7 @@ def _evaluate_single_model(model_path, episodes, delay, fps, device, num_pellets
 @click.option("--fps", default=1000, help="Frames per second during evaluation.")
 @click.option(
     "--models",
-    default="best,final",
+    default="best,final,last",
     help="Comma-separated checkpoint types to evaluate (best,final,model).",
 )
 @click.option(
@@ -137,10 +138,13 @@ def eval_cmd(paths, episodes, delay, fps, models, device, procs, top_n, num_pell
 
                     model_file = os.path.join(root, file)
                     if any(ignore in model_file for ignore in model_ignores):
-                        print("Ignoring:", model_file)
                         continue
-                    if any(file == f"{m}_model.pt" for m in models):
-                        model_files.append(os.path.join(root, file))
+                    # print("models", models)
+                    # print("model_file", model_file)
+                    # input()
+                    if models:
+                        if any(file == f"{m}_model.pt" for m in models):
+                            model_files.append(os.path.join(root, file))
         elif p.endswith(".pt"):
             if any(ignore in p for ignore in model_ignores):
                 print("Ignoring:", p)
@@ -158,9 +162,10 @@ def eval_cmd(paths, episodes, delay, fps, models, device, procs, top_n, num_pell
         print(" -", mf)
 
     results = []
-    with concurrent.futures.ProcessPoolExecutor(max_workers=min(procs, len(model_files))) as pool, open(
-        output_path, "a"
-    ) as f:
+    with (
+        concurrent.futures.ProcessPoolExecutor(max_workers=min(procs, len(model_files))) as pool,
+        open(output_path, "a") as f,
+    ):
         futures = [
             pool.submit(_evaluate_single_model, mp, episodes, delay, fps, device, num_pellets, target_sizes)
             for mp in model_files
@@ -217,5 +222,48 @@ def eval_cmd(paths, episodes, delay, fps, models, device, procs, top_n, num_pell
     print(f"\n✅ Evaluation complete. Results written to {output_path}")
 
 
+# ---------------------------------------------------------------------------
+# curiosity evaluation (visual sanity check)
+# ---------------------------------------------------------------------------
+@click.command("eval-curiosity")
+@click.argument("model_path", type=click.Path(exists=True))
+@click.option("--episodes", default=3, help="Number of episodes to visualize.")
+@click.option("--fps", default=200, help="Frames per second.")
+@click.option("--device", default="cpu", type=click.Choice(["cpu", "mps", "cuda"], case_sensitive=False))
+@click.option("--width", default=24, help="Maze width.")
+@click.option("--height", default=24, help="Maze height.")
+@click.option("--delay", default=0.0, help="Frame delay between steps (e.g., 0.05 for slow-mo).")
+@click.option("--output", is_flag=True, help="Print stats per episode.")
+@click.option("--show", is_flag=True, help="Render Pac-Man live window.")
+def eval_curiosity_cmd(model_path, episodes, fps, device, width, height, delay, output, show):
+    """
+    Run a curiosity-pretrained model visually.
+    Example:
+        dojo eval-curiosity runs2/curiosity_pretrain/final_model.pt --episodes 5 --show
+    """
+
+    print(f"🧠 Loading curiosity model from {model_path}")
+    spec = MazeSpec(width=width, height=height, pellet_mode="custom", surround_walls=True)
+
+    score = evaluate_curiosity_same_size(
+        model_path,
+        spec,
+        episodes=episodes,
+        device=device,
+    )
+    print(f"\n🌍 Avg visited fraction = {score:.3f}")
+
+
 if __name__ == "__main__":
-    eval_cmd()
+    # Allow both main commands
+    commands = {
+        "eval": eval_cmd,
+        "eval-curiosity": eval_curiosity_cmd,
+    }
+
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] in commands:
+        commands[sys.argv[1]]()
+    else:
+        print("Usage:\n  dojo eval [options...]\n  dojo eval-curiosity MODEL_PATH [options...]")

@@ -1,6 +1,7 @@
 import os
 import pickle
 import random
+import sys  # noqa
 import time
 from collections import deque
 from dataclasses import replace
@@ -10,8 +11,8 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from dojo_agent import Agent
-from pacman_env import ACTIONS, Config, MazeSpec, PacmanEnv
+from dojo_agent import Agent, ReplayBuffer  # noqa
+from pacman_env import ACTIONS, Config, CuriousPacmanEnv, MazeSpec, PacmanEnv  # noqa
 
 
 def preprocess_state(state):
@@ -24,6 +25,9 @@ def preprocess_state(state):
     for gx, gy in state["ghosts"]:
         if 0 <= gx < pellets.shape[1] and 0 <= gy < pellets.shape[0]:
             ghosts[gy, gx] = 1.0
+
+    # visit = state.get("visitation", np.zeros_like(pellets))
+    # stacked = np.stack([pellets, pac, ghosts, visit], axis=0)
     stacked = np.stack([pellets, pac, ghosts], axis=0)
     return stacked
 
@@ -85,6 +89,33 @@ def save_state(
             pickle.dump(list(replay_buffer), f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
+def rolling_slope(series, window=500):
+    if len(series) < 50:  # need at least 50 points to be meaningful
+        return None
+    w = min(window, len(series))
+    xs = np.arange(w)
+    ys = np.array(series[-w:])
+    xs = xs - xs.mean()
+    ys = ys - ys.mean()
+    denom = np.sum(xs**2)
+    if denom < 1e-6:
+        return 0.0
+    return np.sum(xs * ys) / denom
+
+
+def _label_from_path(path: str, idx: int = 0) -> str:
+    """Generate a readable label (e.g., stage25_replay_buffer) from path or fallback to teacher_{idx}."""
+    base = os.path.basename(path)
+    parent = os.path.basename(os.path.dirname(path))
+    if base.endswith(".pkl"):
+        base = base[:-4]
+    if parent:
+        label = f"{parent}_{base}"
+    else:
+        label = base or f"teacher_{idx}"
+    return label[:40]  # truncate for safety
+
+
 def train_stage(
     stage_name,
     maze_spec: MazeSpec,
@@ -98,7 +129,11 @@ def train_stage(
     replay_batch_size=64,
     replay_buffer_size=100000,
     max_steps_per_episode: Optional[int] = None,
+    prev_replay_buffers: Optional[deque] = None,
     output_dir="runs",
+    decay_mode="exponential",  # "linear" or "exponential"
+    Env=PacmanEnv,
+    TBARLMode=1,  # 1) Sample from previous buffers for regression stop AND add those samples to the current buffer  0) Sample from previous buffers for regression stop ONLY
 ):
     """
     Train a DQN agent on a given Pac-Man maze with robust convergence detection.
@@ -110,6 +145,34 @@ def train_stage(
     output_dir = os.path.join(output_dir, stage_name)
     writer = SummaryWriter(log_dir=os.path.join(output_dir, "tb"))
 
+    # Normalize and load any previous buffers
+    loaded_prev_buffers = []
+    print("Loading replay buffers")
+    start = time.time()
+
+    if prev_replay_buffers:
+        if isinstance(prev_replay_buffers, dict):
+            total_p = sum(prev_replay_buffers.values())
+            for i, (path, prob) in enumerate(prev_replay_buffers.items()):
+                if os.path.exists(path):
+                    with open(path, "rb") as f:
+                        buf = pickle.load(f)
+                    label = _label_from_path(path, i)
+                    loaded_prev_buffers.append((buf, prob / total_p, label))
+        elif isinstance(prev_replay_buffers, str):
+            path = prev_replay_buffers
+            if os.path.exists(path):
+                with open(path, "rb") as f:
+                    buf = pickle.load(f)
+                label = _label_from_path(path, 0)
+                loaded_prev_buffers.append((buf, 1.0, label))
+
+    total_time = time.time() - start
+    labels = [label for *_, label in loaded_prev_buffers]
+    print(f"Loaded replay buffers: {labels}")
+    print(f"Time taken to load replay buffers: {total_time:.2f}s")
+    print("TBARL Mode:", TBARLMode)
+
     # --- Environment setup ---
     current_spec = spec_sampler() if spec_sampler is not None else maze_spec
     if max_steps_per_episode is not None:
@@ -117,23 +180,21 @@ def train_stage(
     else:
         max_steps = current_spec.width * current_spec.height * 10  # simple heuristic
 
-    env = PacmanEnv(
+    env = Env(
         Config(maze_spec=current_spec, max_steps=max_steps, fps=2000),
         human_mode=False,
         headless=True,
     )
     sample_state = preprocess_state(env.reset())
+    print("Pacman at:", env.pacman.position)
+    print("Maze shape:", env.maze.width, env.maze.height)
+
     obs_shape = sample_state.shape
     n_actions = len(ACTIONS)
 
     # --- Setup the agent with appropriate memory size ---
     if agent is None:
         agent = Agent(obs_shape, n_actions, memory_size=replay_buffer_size)
-
-    # Inside train_stage, after loading pretrained weights:
-    # for name, param in agent.model.named_parameters():
-    #     if "conv" in name:
-    #         param.requires_grad = False
 
     # --- Optional weight transfer ---
     if pretrained_path and os.path.exists(pretrained_path):
@@ -165,7 +226,11 @@ def train_stage(
     # --- Adjust replay buffer size if needed ---
     if replay_buffer_size != agent.memory.maxlen:
         print(f"🔄 Growing replay buffer from {agent.memory.maxlen} → {replay_buffer_size}")
-        agent.memory = deque(agent.memory, maxlen=replay_buffer_size)
+        new_rb = ReplayBuffer(replay_buffer_size)
+        for t in agent.memory:  # preserves (s,a,r,s',done[,origin])
+            new_rb.push(t if len(t) == 6 else t, origin=(t[5] if len(t) == 6 else "self"))
+        agent.memory = new_rb
+
     agent.steps = 0  # reset epsilon decay counter
 
     os.makedirs(f"runs/{stage_name}", exist_ok=True)
@@ -174,6 +239,8 @@ def train_stage(
     # --- Logging and convergence tracking ---
     recent_rewards = []
     recent_success = []
+    reward_history = []
+    success_history = []
     best_mean = -float("inf")
     no_improve_counter = 0
     total_steps = 0
@@ -181,14 +248,15 @@ def train_stage(
 
     # Estimate maximum achievable reward from the actual layout
     max_possible = _estimate_max_reward(env)
-    min_train_episodes = max(500, current_spec.width * current_spec.height * 50)
+    # min_train_episodes = max(500, current_spec.width * current_spec.height * 50)
+    min_train_episodes = 500
     state = sample_state
 
     # Setup training hyperparameters
     epsilon = eps_start
 
     for ep in range(episodes):
-
+        episode_start = time.time()
         # Decay epsilon over time
         # epsilon = eps_end + (eps_start - eps_end) * np.exp(-1.0 * total_steps / eps_decay)
 
@@ -197,15 +265,23 @@ def train_stage(
         if ep < warmup_episodes:
             epsilon = eps_start
         else:
-            epsilon = max(
-                eps_end, eps_start - ((ep - warmup_episodes) / (episodes - warmup_episodes)) * (eps_start - eps_end)
-            )
+            if decay_mode == "linear":
+                # Linear epsilon decay
+                epsilon = max(
+                    eps_end, eps_start - ((ep - warmup_episodes) / (episodes - warmup_episodes)) * (eps_start - eps_end)
+                )
 
-        # Linear epsilon decay
+            elif decay_mode == "exponential":
+                # Exponential epsilon decay
+                # eps = eps_end + (eps_start - eps_end) * exp(-k * (ep - warmup))
+                # where k chosen so eps ≈ eps_end at final episode
+                decay_rate = np.log(eps_start / eps_end) / (episodes - warmup_episodes)
+                epsilon = max(eps_end, eps_start * np.exp(-decay_rate * (ep - warmup_episodes)))
 
         done = False
         total_reward = 0
         steps_in_ep = 0
+        prior_replay_samples = 0
 
         render_this_episode = ep % 100 == 0
         while not done:
@@ -214,8 +290,8 @@ def train_stage(
             next_state = preprocess_state(raw_next)
 
             agent.remember((state, action, reward, next_state, done))
-            if info.get("pellets_remaining", 1) == 0:  # bias towards clearted mazes.  Prolly should be a param
-                agent.remember((state, action, reward, next_state, done))
+            # if info.get("pellets_remaining", 1) == 0:  # bias towards cleared mazes.  Prolly should be a param
+            #     agent.remember((state, action, reward, next_state, done))
 
             state = next_state
             total_reward += reward
@@ -223,7 +299,43 @@ def train_stage(
             total_steps += 1
 
             # Learn periodically
-            if total_steps % 10 == 0 and len(agent.memory) > replay_batch_size:
+            # --- Possibly sample from past buffers ---
+            # --- TBARL: occasionally cross-sample from teacher replay buffers ---
+            if loaded_prev_buffers and random.random() < 0.25:  # 25% chance to activate TBARL this step
+                # Choose which prior buffer based on probabilities
+                r = random.random()
+                cum = 0.0
+                sample_buf, label = None, None
+
+                for buf, prob, lbl in loaded_prev_buffers:
+                    cum += prob
+                    if r <= cum:
+                        sample_buf, label = buf, lbl
+                        break
+
+                # Fallback: if rounding or zero weights left sample_buf unset
+                if sample_buf is None:
+                    sample_buf, _, label = loaded_prev_buffers[-1]
+
+                # --- Sample and train on teacher experiences ---
+                if len(sample_buf) > 0:
+                    samples = random.sample(sample_buf, min(len(sample_buf), replay_batch_size))
+                    agent.replay(batch_size=replay_batch_size, buffer=samples)
+
+                    # Optionally inject some into current buffer
+                    if TBARLMode == 1:
+                        counts = agent.memory.counts()
+                        total = max(counts["total"], 1)
+                        self_frac = counts["self"] / total
+
+                        # only add if self samples are more than 50%.  This will keep buffer balanced
+                        if self_frac > 0.5:
+                            prior_replay_samples += len(samples)
+                            # Optionally subsample to limit teacher dominance
+                            for exp in samples:
+                                agent.remember(exp, origin=label)
+            else:
+                # Standard self replay
                 agent.replay(batch_size=replay_batch_size)
 
             if render_this_episode:
@@ -231,27 +343,34 @@ def train_stage(
 
         # --- Reward tracking ---
         recent_rewards.append(total_reward)
+        reward_history.append(total_reward)
         if len(recent_rewards) > 100:
             recent_rewards.pop(0)
 
+        if len(reward_history) > 2000:
+            reward_history.pop(0)
+
         pellets_remaining = info.get("pellets_remaining", 0)
         recent_success.append(1.0 if pellets_remaining == 0 else 0.0)
+        success_history.append(1.0 if pellets_remaining == 0 else 0.0)
         if len(recent_success) > 200:
             recent_success.pop(0)
+        if len(success_history) > 2000:
+            success_history.pop(0)
 
         avg = np.mean(recent_rewards)
         std = np.std(recent_rewards)
         rel_std = std / (abs(avg) + 1e-8)
         progress = min(avg / max_possible, 1.0)
+
+        # This should trend towards 1.0 as agent learns to clear mazes reliably
         success_rate = np.mean(recent_success) if recent_success else 0.0
 
         # --- Target update ---
-        if ep % 20 == 0:
+        if ep > 0 and ep % 20 == 0:
             agent.update_target()
 
-        # --- Logging + checkpoint ---
-        if ep % 50 == 0:
-            # eps_val = eps_end + (eps_start - eps_end) * np.exp(-1.0 * total_steps / eps_decay)
+        if ep > 0 and ep % 50 == 0:
             save_state(
                 agent.model.state_dict(),
                 stage_name,
@@ -262,18 +381,23 @@ def train_stage(
                 success_rate,
                 avg,
                 std,
-                model_name="model.pt",
+                model_name="last_model.pt",
                 replay_buffer=agent.memory,
-                output_dir=f"{output_dir}/{stage_name}",
+                output_dir=f"{output_dir}",
             )
+
+            total_episode_time = time.time() - episode_start
+            replay_buffer_report = agent.memory.report()
             print(
-                f"Episode {ep:4d} | reward={total_reward:6.2f} | avg={avg:6.2f} | std={std:5.2f} "
-                f"| rel_std={rel_std*100:4.2f}% | eps={epsilon:.3f} | progress={progress*100:5.1f}% | total_steps={total_steps:,}"
+                f"Episode {ep:4d} | reward={total_reward:6.2f} | success_rate_100={success_rate*100:5.1f}% | reward/avg_100={avg:6.2f} | reward/std_100={std:5.2f} "
+                f"| rel_std={rel_std*100:4.2f}% | eps={epsilon:.3f} | progress={progress*100:5.1f}% | total_steps={total_steps:,} "
+                f"| episode_time={total_episode_time:.2f}s | len(recent_rewards)={len(recent_rewards)} | replay_buffer_report={replay_buffer_report}"
             )
 
             # --- Best model tracking ---
             avg_change = abs(avg - best_mean)
             if avg > best_mean + 0.01:
+                print("saving for new best model with avg reward:", avg)
                 best_mean = avg
                 save_state(
                     agent.model.state_dict(),
@@ -287,42 +411,40 @@ def train_stage(
                     std,
                     model_name="best_model.pt",
                     replay_buffer=agent.memory,
-                    output_dir=f"{output_dir}/{stage_name}",
+                    output_dir=f"{output_dir}",
                 )
                 no_improve_counter = 0
             else:
                 no_improve_counter += 1
 
             # --- Early stopping logic ---
-            if len(recent_rewards) == 100 and ep >= min_train_episodes:
-                # 1️⃣ Solved: clears maze reliably with stable high reward
-                # if success_rate >= 0.98 and avg >= 0.98 * max_possible and std <= 0.02 * max_possible:
-                #     print(
-                #         f"✅ Early stopping: solved (success={success_rate*100:.1f}%, avg={avg:.2f}, std={std:.2f}) at ep {ep}"
-                #     )
-                #     save_state(
-                #         agent.model.state_dict(),
-                #         stage_name,
-                #         current_spec,
-                #         pretrained_path,
-                #         episodes,
-                #         max_possible,
-                #         success_rate,
-                #         avg,
-                #         std,
-                #         model_name="final_model.pt",
-                #         replay_buffer=agent.memory,
-                #         output_dir=f"{output_dir}/{stage_name}",
-                #     )
+            if len(recent_rewards) >= 200 and ep >= min_train_episodes:
+                ready_to_save = False
 
-                #     env.close()
-                #     return agent
+                slope_reward = rolling_slope(recent_rewards, 1000)
+                slope_success = rolling_slope(recent_success, 1000)
+                mean_r = np.mean(recent_rewards)
+                std_r = np.std(recent_rewards)
+                success_rate = np.mean(recent_success)
 
-                # 2️⃣ Plateaued: high performance but no improvement for a while
-                if success_rate >= 0.90 and std <= 0.05 * max_possible and no_improve_counter > 20:
-                    print(
-                        f"🟡 Plateau detected: stopping (success={success_rate*100:.1f}%, avg={avg:.2f}, Δavg={avg_change:.3f})"
-                    )
+                # --- Normalized metrics ---
+                rel_mean = mean_r / (max_possible + 1e-8)
+                rel_std = std_r / (max_possible + 1e-8)
+                slope_r_norm = (slope_reward or 0) / (max_possible + 1e-8)
+
+                if success_rate >= 0.97 and rel_mean >= 0.90 and rel_std <= 0.12:
+                    print(f"✅ Solved: succ={success_rate:.3f}, rel_mean={rel_mean:.2f}, rel_std={rel_std:.2f}")
+                    ready_to_save = True
+
+                elif success_rate >= 0.90 and abs(slope_r_norm) < 1e-4 and rel_std <= 0.15:
+                    print(f"🟡 Plateau: slope={slope_r_norm:.6f}, succ={success_rate:.3f}, rel_std={rel_std:.2f}")
+                    ready_to_save = True
+
+                elif abs(slope_r_norm) < 1e-4 and (slope_success is not None and abs(slope_success) < 1e-4):
+                    print(f"🟢 Converged: slope_r={slope_r_norm:.5f}, slope_s={slope_success:.5f}")
+                    ready_to_save = True
+
+                if ready_to_save:
                     save_state(
                         agent.model.state_dict(),
                         stage_name,
@@ -331,34 +453,12 @@ def train_stage(
                         episodes,
                         max_possible,
                         success_rate,
-                        avg,
-                        std,
+                        mean_r,
+                        std_r,
                         model_name="final_model.pt",
                         replay_buffer=agent.memory,
-                        output_dir=f"{output_dir}/{stage_name}",
+                        output_dir=output_dir,
                     )
-
-                    env.close()
-                    return agent
-
-                # 3️⃣ Converged mean: flat trend with low variability
-                if avg_change < 0.005 and std <= 0.03 * max_possible:
-                    print(f"🟢 Converged mean: avg={avg:.2f}, Δavg={avg_change:.3f}, std={std:.2f} at ep {ep}")
-                    save_state(
-                        agent.model.state_dict(),
-                        stage_name,
-                        current_spec,
-                        pretrained_path,
-                        episodes,
-                        max_possible,
-                        success_rate,
-                        avg,
-                        std,
-                        model_name="final_model.pt",
-                        replay_buffer=agent.memory,
-                        output_dir=f"{output_dir}/{stage_name}",
-                    )
-
                     env.close()
                     return agent
 
@@ -369,13 +469,14 @@ def train_stage(
             writer.add_scalar("exploration/epsilon", epsilon, ep)
             writer.add_scalar("memory/fill_ratio", len(agent.memory) / agent.memory.maxlen, ep)
             writer.add_scalar("success/rate", success_rate, ep)
+            writer.add_scalar("replay/prior_samples", prior_replay_samples, ep)
 
         # Prepare next episode (potentially with fresh layout)
         if spec_sampler is not None:
             env.close()
             current_spec = spec_sampler()
             max_steps = current_spec.width * current_spec.height * 10  # simple heuristic
-            env = PacmanEnv(
+            env = Env(
                 Config(maze_spec=current_spec, max_steps=max_steps, fps=2000),
                 human_mode=False,
                 headless=True,
@@ -403,7 +504,7 @@ def train_stage(
         std,
         model_name="final_model.pt",
         replay_buffer=agent.memory,
-        output_dir=f"{output_dir}/{stage_name}",
+        output_dir=f"{output_dir}",
     )
     writer.close()
     return agent
@@ -560,8 +661,40 @@ if __name__ == "__main__":
 
     stage = 1
     prev_final = None
-    output_dir = "runs2"
+    output_dir = "curiosity_runs"
     # # prev_final = "saved_models/0.7352_stage3_best_model.pt"
+
+    # Playign with new CuriousPacmanEnv that is a bit faster for just training agents
+    agent = None
+    stage_name = "curiousity_pretrain"
+
+    width = 4
+    height = 4
+
+    sampler = _random_episode_sampler(
+        MazeSpec(width=width, height=height, pellet_mode="custom", surround_walls=True),
+        randomize_pacman=True,
+        pellet_density=0,  # no pellets in curious agent
+    )
+    print(f"\n=== Training {stage_name} [{width}x{height} | curiosity] (random start) ===")
+    agent = train_stage(
+        stage_name,
+        spec_sampler=sampler,
+        maze_spec=MazeSpec(width=width, height=height, pellet_mode="custom", surround_walls=True),
+        pretrained_path=prev_final,
+        eps_start=0.8,
+        eps_end=0.05,
+        agent=agent,
+        episodes=5000,
+        replay_buffer_size=5000,
+        output_dir=output_dir,
+        Env=CuriousPacmanEnv,
+        max_steps_per_episode=20,
+    )
+    prev_final = f"{output_dir}/{stage_name}/final_model.pt"
+    print("Curiousity agent trains and saved at:", f"{output_dir}/{stage_name}/final_model.pt")
+    stage += 1
+    sys.exit(1)
 
     # # === 2x2 curriculum – single pellet enumeration ===
     # stages 1 through 8
@@ -598,7 +731,7 @@ if __name__ == "__main__":
                 output_dir=output_dir,
             )
             init = False
-            prev_final = f"runs/{stage_name}/final_model.pt"
+            prev_final = f"{output_dir}/{stage_name}/final_model.pt"
             stage += 1
 
     # # === 2x2 curriculum – full pellets (4 starts) ===
@@ -626,7 +759,7 @@ if __name__ == "__main__":
             replay_buffer_size=5000,
             output_dir=output_dir,
         )
-        prev_final = f"runs/{stage_name}/final_model.pt"
+        prev_final = f"{output_dir}/{stage_name}/final_model.pt"
         stage += 1
 
     # === 4x4 density curricula ===
@@ -651,7 +784,7 @@ if __name__ == "__main__":
             replay_buffer_size=20000,
             output_dir=output_dir,
         )
-        prev_final = f"runs/stage{stage}/final_model.pt"
+        prev_final = f"{output_dir}/stage{stage}/final_model.pt"
         print("completed density:", density)
         stage += 1
 
@@ -680,6 +813,6 @@ if __name__ == "__main__":
             replay_buffer_size=50000,
             output_dir=output_dir,
         )
-        prev_final = f"runs/stage{stage}/final_model.pt"
+        prev_final = f"{output_dir}/stage{stage}/final_model.pt"
         print("completed density:", density)
         stage += 1

@@ -18,16 +18,126 @@ from failed_run_recorder import FailedRunRecorder  # noqa
 from pacman_env import (  # noqa
     ACTIONS,
     Config,
+    CuriousPacmanEnv,
     MazeSpec,
     PacmanEnv,
     generate_rect_layout,
 )
 
-# Exact runs each time
-# seed = 42
-# random.seed(seed)
-# np.random.seed(seed)
-# torch.manual_seed(seed)
+
+def evaluate_curiosity(
+    model_path: str,
+    maze_spec: MazeSpec,
+    episodes: int = 5,
+    delay: float = 0.0,
+    fps: int = 200,
+    show_pacman: bool = False,
+    output: bool = True,
+    device: str = "cpu",
+    random_pacman_start=True,
+) -> float:
+    """
+    Evaluate a curiosity-pretrained model.
+
+    Score = average fraction of unique tiles visited per episode.
+    1.0 means the agent explored every reachable tile at least once.
+    """
+
+    print("show_pacman:", show_pacman)
+    print("maze_spec:", maze_spec)
+
+    env = CuriousPacmanEnv(
+        Config(maze_spec=maze_spec, fps=fps, max_steps=1024),
+        human_mode=False,
+        headless=False,
+    )
+
+    if show_pacman:
+        env.render("human")
+
+    sample_state = preprocess_state(env.reset())
+    agent = Agent(sample_state.shape, len(ACTIONS), device=device)
+    agent.model.load_state_dict(torch.load(model_path, map_location=device))
+    agent.model.eval()
+
+    if output:
+        print(f"🧭 Evaluating curiosity model on {maze_spec.width}x{maze_spec.height} maze...")
+
+    total_fraction, total_reward = 0.0, 0.0
+
+    for ep in range(episodes):
+        state = preprocess_state(env.reset())
+        done = False
+        ep_reward = 0.0
+
+        ep_spec = copy.deepcopy(maze_spec)
+
+        # Randomize starts / pellets
+        if random_pacman_start:
+            ep_spec = replace(
+                ep_spec, pacman_start=(random.randint(0, ep_spec.width - 1), random.randint(0, ep_spec.height - 1))
+            )
+
+        layout = tuple(generate_rect_layout(ep_spec))
+        # --- Convert to mutable numeric grid ---
+        # layout_np = np.array([[1 if c == "#" else 0 for c in row] for row in layout], dtype=np.int8)
+
+        # # --- Add one random interior wall ---
+        # x, y = random.randint(1, layout_np.shape[1] - 2), random.randint(1, layout_np.shape[0] - 2)
+        # if (x, y) != ep_spec.pacman_start:
+        #     layout_np[y, x] = 1  # mark as wall
+
+        # # --- Convert back to string rows ---
+        # layout = tuple("".join("#" if v == 1 else "." for v in row) for row in layout_np)
+
+        cfg = Config(maze_layout=layout, max_steps=200, fps=fps)
+        env.close()
+        env = CuriousPacmanEnv(cfg, human_mode=False, headless=False)
+        state = preprocess_state(env.reset())
+        if show_pacman:
+            env.render("human")
+
+        while not done:
+            with torch.no_grad():
+                s = torch.tensor(state, dtype=torch.float32, device=agent.device).unsqueeze(0)
+                action = int(torch.argmax(agent.model(s)).item())
+                # action = random.choice(list(ACTIONS.keys()))
+                print("Action chosen:", action)
+                # input()
+            next_state, reward, done, info = env.step(action)
+            state = preprocess_state(next_state)
+            ep_reward += reward
+            if show_pacman:
+                env.render("human")
+            if delay:
+                time.sleep(delay)
+
+        visited_fraction = info.get("visited_fraction", 0.0)
+        total_fraction += visited_fraction
+        total_reward += ep_reward
+
+        if output:
+            print(f"  ✅ Ep{ep}: visited={visited_fraction:.2f}, reward={ep_reward:.2f}")
+
+    env.close()
+    avg_fraction = total_fraction / episodes
+    avg_reward = total_reward / episodes
+
+    if output:
+        print(f"🌍 Avg visited fraction={avg_fraction:.3f}, Avg reward={avg_reward:.3f}")
+
+    return avg_fraction
+
+
+def evaluate_curiosity_same_size(model_path, maze_spec, episodes=10, device="cpu"):
+    return evaluate_curiosity(
+        model_path,
+        maze_spec,
+        episodes=episodes,
+        device=device,
+        show_pacman=True,
+        output=True,
+    )
 
 
 def evaluate(
@@ -309,13 +419,16 @@ if __name__ == "__main__":
     run_dir = "runs/failure_mix/"
     run_name = "best_overall"
 
+    # density/cluster_tbarl_1/density_0.02/last_model.pt
+
     # runs/stage26/final_model.pt
-    run_dir = "runs"
-    run_name = "stage27"
+    run_dir = "density/cluster_tbarl_1/"
+    # run_dir = "density/random_tbarl_0/"
+    run_name = "density_0.02"
     # "saved_models/0.7352_stage3_best_model.pt"
 
     stage_path = os.path.join(run_dir, run_name)
-    model_path = os.path.join(stage_path, "final_model.pt")
+    model_path = os.path.join(stage_path, "last_model.pt")
 
     # model_path = "saved_models/0.7352_stage3_best_model.pt"
     config_path = os.path.join(stage_path, "config.pkl")
@@ -329,11 +442,11 @@ if __name__ == "__main__":
     num_pellets = random.randint(1, (spec.width * spec.height) - 1)
     print("Number of random pellets for evaluation:", num_pellets)
 
-    episodes = 20
+    episodes = 25
     results = 0
-    num_pellets = 20
+    num_pellets = 2
 
-    target_sizes = [(8, 8), (10, 10), (12, 12)]
+    target_sizes = [(8, 8)]
 
     results = evaluate_cross_size(
         model_path,
@@ -342,7 +455,7 @@ if __name__ == "__main__":
         episodes_per_size=episodes,
         show_pacman=True,
         output=True,
-        delay=0,
+        delay=0.025,
         fps=1000,
         num_pellets=num_pellets,
     )

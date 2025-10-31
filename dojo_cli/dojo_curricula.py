@@ -69,4 +69,5 @@ def curriculum_4x4_random():
 
 CURRICULA = {
     "4x4_random": curriculum_4x4_random,
+    "density": lambda: [],  # Density curriculum is handled directly in dojo_train.py
 }

@@ -424,6 +424,56 @@ class Ghost:
         ]
 
 
+class AgentEnv:
+    def __init__(self, width=8, height=8, surround_walls=True, max_steps=None):
+        # This is just a placeholder environment for testing agents
+        self.width = width
+        self.height = height
+        self.surround_walls = surround_walls
+        self.max_steps = max_steps or width * height * 10
+        self.reset()
+
+    def reset(self):
+        # position agent at random start
+        self.agent_pos = (np.random.randint(self.width), np.random.randint(self.height))
+        self.visited = np.zeros((self.height, self.width), dtype=np.float32)
+        self._step_counter = 0
+        return self._get_state()
+
+    def _get_state(self):
+        grid = np.zeros((1, self.height, self.width), dtype=np.float32)
+        x, y = self.agent_pos
+        grid[0, y, x] = 1.0
+        return {"grid": grid}
+
+    def _move(self, action):
+        dxdy = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        dx, dy = dxdy[action]
+        x, y = self.agent_pos
+        nx, ny = np.clip(x + dx, 0, self.width - 1), np.clip(y + dy, 0, self.height - 1)
+        self.agent_pos = (nx, ny)
+
+    def step(self, action):
+        raise NotImplementedError
+
+
+class CuriosityEnv(AgentEnv):
+    def step(self, action):
+        self._move(action)
+        self._step_counter += 1
+        x, y = self.agent_pos
+
+        # intrinsic curiosity reward = how new is this tile?
+        novelty = 1.0 - np.tanh(self.visited[y, x])
+        reward = novelty
+        self.visited[y, x] += 1.0
+
+        done = self._step_counter >= self.max_steps
+        state = self._get_state()
+        info = {"novelty": novelty, "visited_fraction": (self.visited > 0).mean()}
+        return state, reward, done, info
+
+
 class PacmanEnv:
     """Gym-style environment exposing reset, step, and render interfaces."""
 
@@ -587,6 +637,114 @@ class PacmanEnv:
         for ghost in self.ghosts:
             center = (ghost.position[0] * tile + tile // 2, ghost.position[1] * tile + tile // 2)
             pygame.draw.circle(surface, self.config.ghost_color, center, tile // 2 - 2)
+
+
+class CuriousPacmanEnv(PacmanEnv):
+    """
+    Standalone curiosity-driven environment.
+    Does NOT call PacmanEnv.step() — handles movement and reward internally.
+    Rewards exploration and visiting new tiles.
+    """
+
+    def __init__(
+        self,
+        *args,
+        curiosity_beta: float = 0.1,
+        revisit_penalty: float = 0.001,
+        clear_bonus: float = 1.0,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.curiosity_beta = curiosity_beta
+        self.revisit_penalty = revisit_penalty
+        self.clear_bonus = clear_bonus
+        self.last_action: None | int = None
+
+        self.ghosts = []  # 👈 disables ghosts entirely
+
+        self.maze.pellets[:] = False
+
+        # visitation grid (includes borders)
+        self.visitation = np.zeros((self.maze.height, self.maze.width), dtype=np.float32)
+
+    def reset(self):
+        obs = super().reset()
+        # print("Pacman starts at:", self.pacman.position)
+        # print("Is wall at start?", self.maze.is_wall(self.pacman.position))
+        self.visitation.fill(0)
+        self.ghosts = []  # 👈 disables ghosts entirely
+        self.maze.pellets[:] = False
+        self._step_counter = 0
+        return obs
+
+    def _get_state(self) -> Dict[str, np.ndarray]:
+        """Build a curiosity-only state representation compatible with preprocess_state()."""
+        pacman_pos = np.array(self.pacman.position, dtype=np.int16)
+
+        # ✅ Empty ghost and pellet layers with correct shape
+        pellets = np.zeros((self.maze.height, self.maze.width), dtype=np.float32)
+        ghosts = np.empty((0, 2), dtype=np.int16)
+        visit_norm = self.visitation / (self.visitation.max() + 1e-6)
+
+        return {"pacman": pacman_pos, "ghosts": ghosts, "pellets": pellets, "visitation": visit_norm.astype(np.float32)}
+
+    def step(self, action):
+        if action is None or action not in ACTIONS:
+            raise ValueError("Curious agent requires valid action from {0,1,2,3}")
+
+        self.pacman.set_direction(ACTIONS[action], self.maze)
+        self.pacman.step(self.maze)
+        px, py = self.pacman.position
+
+        # --- curiosity rewards ---
+        new_tile = self.visitation[py, px] == 0
+
+        self.visitation[py, px] += 1
+
+        # --- visitation count novelty bonus ---
+        # Diminishing novelty
+        reward = 1.0 / np.sqrt(1 + self.visitation[py, px])
+
+        # Add local exploration context
+        neighborhood = self.visitation[max(0, py - 1) : py + 2, max(0, px - 1) : px + 2]
+        reward += max(0.0, 1.0 - 0.25 * neighborhood.mean())
+
+        # Directional diversity
+        if new_tile and action != self.last_action:
+            reward += 0.2
+
+        # Alive bonus
+        reward += 0.01
+
+        # Step cost
+        reward -= 0.001
+
+        # Decay old visits, this will slowly erase all progress
+        # problably fine for small mazes, if you don't need it: Axe it!
+        self.visitation *= 0.995
+
+        self._step_counter += 1
+
+        done = self._step_counter >= self.max_steps
+
+        self.last_action = action
+
+        info = {
+            "new_tile": new_tile,
+            "visited_fraction": float((self.visitation > 0).mean()),
+            "total_reward": reward,
+        }
+        # if self._step_counter % 50 == 0:
+        # print(
+        #     f"Step {self._step_counter}, action={action}, reward={reward:.3f}, visited={info['visited_fraction']:.2f}"
+        # )
+        # input()
+
+        # print(
+        #     f"vis_mean={self.visitation.mean():.4f}, " f"vis_std={self.visitation.std():.4f}, " f"reward={reward:.4f}"
+        # )
+
+        return self._get_state(), reward, done, info
 
 
 class Game:

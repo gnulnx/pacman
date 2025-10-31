@@ -11,7 +11,10 @@ or create an alias:
 
 import sys
 
+from dojo_cli.dojo_eval import eval_curiosity_cmd
 from dojo_cli.dojo_train import cli
+
+cli.add_command(eval_curiosity_cmd)
 
 
 def main() -> None:

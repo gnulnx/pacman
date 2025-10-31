@@ -7,17 +7,73 @@ import torch.nn as nn
 import torch.optim as optim
 
 
+# =============================
+# Replay Buffer
+# =============================
+class ReplayBuffer:
+    def __init__(self, capacity):
+        self.buffer = deque(maxlen=capacity)
+        self.maxlen = capacity
+
+    def __len__(self):
+        return len(self.buffer)
+
+    def __iter__(self):
+        return iter(self.buffer)
+
+    def push(self, transition, origin="self"):
+        """
+        Add transition to replay buffer.
+        transition: (s, a, r, s', done) or (s, a, r, s', done, origin)
+        origin: str tag (default: "self")
+        """
+        if len(transition) == 6:
+            self.buffer.append(transition)
+        else:
+            self.buffer.append((*transition, origin))
+
+    def sample(self, batch_size):
+        return random.sample(self.buffer, batch_size)
+
+    def counts(self):
+        """Legacy: returns total self/teacher counts."""
+        origins = [o for *_, o in self.buffer]
+        n_self = sum(o == "self" for o in origins)
+        n_teacher = len(origins) - n_self
+        return {"self": n_self, "teacher": n_teacher, "total": len(self.buffer)}
+
+    def counts_by_origin(self):
+        """Full breakdown by all origin tags."""
+        counts = {}
+        for *_, o in self.buffer:
+            counts[o] = counts.get(o, 0) + 1
+        counts["total"] = len(self.buffer)
+        return counts
+
+    def report(self):
+        """Human-readable summary string."""
+        counts = self.counts_by_origin()
+        total = counts.pop("total", 0)
+        parts = [f"total={total}"]
+        for k in sorted(counts.keys()):
+            parts.append(f"{k}={counts[k]}")
+        return " | ".join(parts)
+
+
+# =============================
+# DQN Model
+# =============================
 class DQN(nn.Module):
     def __init__(self, input_channels=3, n_actions=4):
         super().__init__()
-        # conv layers: small receptive field, handles any spatial input
+        # convolutional feature extractor
         self.conv = nn.Sequential(
             nn.Conv2d(input_channels, 16, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
             nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
         )
-        # global pooling → fixed-length regardless of input size
+        # global pooling → fixed-size latent
         self.head = nn.Sequential(
             nn.Linear(32, 128),
             nn.ReLU(),
@@ -25,15 +81,26 @@ class DQN(nn.Module):
         )
 
     def forward(self, x):
-        # x shape: [B, 3, H, W]
+        # x: [B, C, H, W]
         feats = self.conv(x)
         pooled = feats.mean(dim=[2, 3])  # global average pooling
-        q = self.head(pooled)
-        return q
+        return self.head(pooled)
 
 
+# =============================
+# Agent
+# =============================
 class Agent:
-    def __init__(self, obs_shape, n_actions, lr=1e-3, gamma=0.99, device=None, memory_size=10000):
+    def __init__(
+        self,
+        obs_shape,
+        n_actions,
+        lr=1e-3,
+        gamma=0.99,
+        device=None,
+        memory_size=10000,
+        tb_writer=None,
+    ):
         # ✅ auto-detect best device
         if not device:
             if torch.backends.mps.is_available():
@@ -45,18 +112,24 @@ class Agent:
         else:
             self.device = device
 
-        input_channels = obs_shape[0]  # first dimension = number of channels (3)
+        input_channels = obs_shape[0]
         self.model = DQN(input_channels, n_actions).to(self.device)
         self.target = DQN(input_channels, n_actions).to(self.device)
         self.target.load_state_dict(self.model.state_dict())
+
         self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
         self.loss_fn = nn.MSELoss()
         self.gamma = gamma
-        self.memory = deque(maxlen=memory_size)
+        self.memory = ReplayBuffer(memory_size)
         self.n_actions = n_actions
         self.lr = lr
-        self.obj_shape = obs_shape
+        self.obs_shape = obs_shape  # fixed small typo (was obj_shape)
+        self.writer = tb_writer
+        self.global_step = 0
 
+    # -----------------------------
+    # Action selection (epsilon-greedy)
+    # -----------------------------
     def select_action(self, state, epsilon: float) -> int:
         if random.random() < epsilon:
             return random.randrange(self.n_actions)
@@ -65,29 +138,45 @@ class Agent:
             qvals = self.model(state)
             return int(torch.argmax(qvals).item())
 
-    def remember(self, transition):
-        # dequeu setup with maxlen.  So we pop old ones automatically if self.memory > maxlen
-        self.memory.append(transition)
+    # -----------------------------
+    # Memory interface
+    # -----------------------------
+    def remember(self, transition, origin="self"):
+        self.memory.push(transition, origin=origin)
 
-    # Padded replay buffer to avoid errors when buffer is smaller than batch size
-    def replay(self, batch_size=64, gamma=0.99):
-        """Sample random experiences and perform one SGD step, with automatic shape padding."""
-        if len(self.memory) < batch_size:
+    # -----------------------------
+    # Training (single replay step)
+    # -----------------------------
+    def replay(self, batch_size=64, gamma=None, buffer=None):
+        """
+        Sample from buffer (if provided) or internal memory.
+        buffer may be:
+          - list/deque of 5- or 6-tuples
+          - a ReplayBuffer instance
+        """
+        gamma = gamma or self.gamma
+
+        # Resolve buffer reference
+        if buffer is None:
+            pool = self.memory.buffer
+        else:
+            pool = buffer.buffer if hasattr(buffer, "buffer") else buffer
+
+        if len(pool) < batch_size:
             return
 
-        # --- Sample minibatch ---
-        minibatch = random.sample(self.memory, batch_size)
-        states, actions, rewards, next_states, dones = zip(*minibatch)
+        minibatch = random.sample(pool, batch_size)
+        five = [t[:5] for t in minibatch]  # handle both 5/6-tuples
+        states, actions, rewards, next_states, dones = zip(*five)
 
-        # --- Detect or define target shape ---
-        # If agent has fixed obs_shape (from init), use that; else infer from largest sample
+        # Determine shape
         target_shape = getattr(self, "obs_shape", None)
         if target_shape is None:
             max_h = max(s.shape[1] for s in states)
             max_w = max(s.shape[2] for s in states)
             target_shape = (states[0].shape[0], max_h, max_w)
 
-        # --- Pad helper ---
+        # Pad helper
         def pad_state(state, target_shape):
             c, h, w = state.shape
             _, th, tw = target_shape
@@ -97,50 +186,33 @@ class Agent:
             padded[:, :h, :w] = state
             return padded
 
-        # --- Pad all states to uniform size ---
         states = [pad_state(s, target_shape) for s in states]
         next_states = [pad_state(ns, target_shape) for ns in next_states]
 
-        # --- Convert to tensors ---
+        # Convert to tensors
         states = torch.tensor(np.array(states), dtype=torch.float32, device=self.device)
         next_states = torch.tensor(np.array(next_states), dtype=torch.float32, device=self.device)
         actions = torch.tensor(actions, dtype=torch.long, device=self.device)
         rewards = torch.tensor(rewards, dtype=torch.float32, device=self.device)
         dones = torch.tensor(dones, dtype=torch.float32, device=self.device)
 
-        # --- Compute targets ---
+        # Q-learning update
         q_values = self.model(states).gather(1, actions.unsqueeze(1)).squeeze(1)
         next_q_values = self.target(next_states).max(1)[0]
         targets = rewards + gamma * next_q_values * (1 - dones)
 
-        # --- Optimize ---
         loss = self.loss_fn(q_values, targets.detach())
+
+        if self.writer and loss is not None:
+            self.writer.add_scalar("loss/td_error", loss.item(), self.global_step)
+            self.global_step += 1
+
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
 
-    # def replay(self, batch_size=64):
-    #     if len(self.memory) < batch_size:
-    #         return
-    #     batch = random.sample(self.memory, batch_size)
-    #     states, actions, rewards, next_states, dones = zip(*batch)
-    #     states = torch.tensor(np.array(states), dtype=torch.float32, device=self.device)
-    #     actions = torch.tensor(actions, dtype=torch.int64, device=self.device).unsqueeze(1)
-    #     rewards = torch.tensor(rewards, dtype=torch.float32, device=self.device).unsqueeze(1)
-    #     next_states = torch.tensor(np.array(next_states), dtype=torch.float32, device=self.device)
-    #     dones = torch.tensor(dones, dtype=torch.float32, device=self.device).unsqueeze(1)
-
-    #     q_values = self.model(states).gather(1, actions)
-    #     next_q = self.target(next_states).max(1)[0].unsqueeze(1)
-
-    #     # This is the Bellman target you’ve seen conceptually:
-    #     # yi​=ri​+γ(1−donei​)a′max​Qtarget​(si′​,a′)
-    #     target = rewards + (1 - dones) * self.gamma * next_q
-
-    #     loss = nn.functional.mse_loss(q_values, target)
-    #     self.optimizer.zero_grad()
-    #     loss.backward()
-    #     self.optimizer.step()
-
+    # -----------------------------
+    # Target sync
+    # -----------------------------
     def update_target(self):
         self.target.load_state_dict(self.model.state_dict())
