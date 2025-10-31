@@ -541,6 +541,12 @@ class PacmanEnv:
 
         state = self._get_state()
         info = {"pellets_remaining": int(self.maze.pellets.sum())}
+
+        # New bonus for clearing all pellets.  This should encourage full maze completion.
+        if not self.maze.pellets.any() and not collision:
+            reward += 5.0  # bonus for clearing the maze
+            info["maze_cleared"] = 1
+
         if max_steps_reached:
             info["max_steps_reached"] = 1
         if self._recording:
@@ -669,8 +675,6 @@ class CuriousPacmanEnv(PacmanEnv):
 
     def reset(self):
         obs = super().reset()
-        # print("Pacman starts at:", self.pacman.position)
-        # print("Is wall at start?", self.maze.is_wall(self.pacman.position))
         self.visitation.fill(0)
         self.ghosts = []  # 👈 disables ghosts entirely
         self.maze.pellets[:] = False
