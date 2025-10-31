@@ -46,6 +46,7 @@ def cli():
     type=click.Choice(["random", "cluster", "lattice_cluster"]),
     help='Type of sampler to use: "random", "cluster", or "lattice_cluster".',
 )
+@click.option("--max-steps-per-episode", default=200, help="Max steps per episode.")
 def train(
     curriculum,
     episodes,
@@ -60,6 +61,7 @@ def train(
     densities,
     tbarl_mode,
     sampler_type,
+    max_steps_per_episode,
 ):
     """Train a model using a predefined curriculum."""
 
@@ -86,7 +88,7 @@ def train(
 
     if sampler_type == "random":
         sampler_func = random_episode_sampler
-    if sampler_type == "lattice_cluster":
+    elif sampler_type == "lattice_cluster":
         sampler_func = lattice_cluster_sampler
     else:  # cluster sampler
         sampler_func = cluster_sampler
@@ -118,6 +120,7 @@ def train(
             output_dir=output_dir,
             prev_replay_buffers={replay_buffer: 1.0},  # prop of 1.0 since only one buffer
             TBARLMode=tbarl_mode,
+            max_steps_per_episode=max_steps_per_episode,
         )
         prev_final = f"{output_dir}/density_{density}/final_model.pt"
         replay_buffer = f"{output_dir}/density_{density}/replay_buffer.pkl"
