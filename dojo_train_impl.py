@@ -4,7 +4,7 @@ import random
 import sys  # noqa
 import time
 from collections import deque
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Callable, Optional
 
 import numpy as np
@@ -39,56 +39,6 @@ def _estimate_max_reward(env: PacmanEnv) -> float:
     return max(1, pellet_count) * 1.0
 
 
-def save_state(
-    state_dict: dict,
-    stage_name: str,
-    current_spec: MazeSpec,
-    pretrained_path,
-    episodes,
-    max_possible,
-    success_rate,
-    avg,
-    std,
-    output_dir=None,
-    model_name="final_model.pt",
-    replay_buffer: Optional[deque] = None,  # 👈 new
-):
-    """
-    Save the model state, replay buffer, and training configuration to disk.
-    """
-    # Legacy behavior: default to runs/stage_name if no output_dir provided
-    # if not output_dir:
-    #     output_dir = f"runs/{stage_name}"
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    # --- Save model ---
-    torch.save(state_dict, f"{output_dir}/{model_name}")
-
-    # --- Save training metadata ---
-    with open(f"{output_dir}/config.pkl", "wb") as f:
-        pickle.dump(
-            {
-                "maze_spec": current_spec,
-                "stage_name": stage_name,
-                "pretrained_path": pretrained_path,
-                "episodes": episodes,
-                "max_possible": max_possible,
-                "success_rate": success_rate,
-                "avg_reward": avg,
-                "std_reward": std,
-            },
-            f,
-        )
-
-    # --- Save replay buffer (optional) ---
-    if replay_buffer is not None:
-        # keep a small subset if buffer is huge
-        buffer_path = f"{output_dir}/replay_buffer.pkl"
-        with open(buffer_path, "wb") as f:
-            pickle.dump(list(replay_buffer), f, protocol=pickle.HIGHEST_PROTOCOL)
-
-
 def rolling_slope(series, window=500):
     if len(series) < 50:  # need at least 50 points to be meaningful
         return None
@@ -101,6 +51,57 @@ def rolling_slope(series, window=500):
     if denom < 1e-6:
         return 0.0
     return np.sum(xs * ys) / denom
+
+
+@dataclass(slots=True, kw_only=True)
+class SaveStateParams:
+    state_dict: dict
+    stage_name: str
+    current_spec: "MazeSpec"
+    pretrained_path: Optional[str]
+    episodes: int
+    max_possible: float
+    success_rate: float
+    avg: float
+    std: float
+    output_dir: Optional[str] = None
+    model_name: str = "final_model.pt"
+    replay_buffer: Optional[deque] = None
+
+
+def save_state(params: SaveStateParams):
+    """
+    Save the model state, replay buffer, and training configuration to disk.
+    """
+    # Legacy behavior: default to runs/stage_name if no output_dir provided
+    output_dir = params.output_dir or f"runs/{params.stage_name}"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # --- Save model ---
+    torch.save(params.state_dict, f"{output_dir}/{params.model_name}")
+
+    # --- Save training metadata ---
+    with open(f"{output_dir}/config.pkl", "wb") as f:
+        pickle.dump(
+            {
+                "maze_spec": params.current_spec,
+                "stage_name": params.stage_name,
+                "pretrained_path": params.pretrained_path,
+                "episodes": params.episodes,
+                "max_possible": params.max_possible,
+                "success_rate": params.success_rate,
+                "avg_reward": params.avg,
+                "std_reward": params.std,
+            },
+            f,
+        )
+
+    # --- Save replay buffer (optional) ---
+    if params.replay_buffer is not None:
+        # keep a small subset if buffer is huge
+        buffer_path = f"{output_dir}/replay_buffer.pkl"
+        with open(buffer_path, "wb") as f:
+            pickle.dump(list(params.replay_buffer), f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 def train_stage(
@@ -315,57 +316,57 @@ def train_stage(
         rel_std = std / (abs(avg) + 1e-8)
         progress = min(avg / max_possible, 1.0)
 
+        total_episode_time = time.time() - episode_start
+        replay_buffer_report = agent.memory.report()
+        avg_replay_time = replay_total_time / max(replay_calls, 1)
+        # --- Normalized metrics ---
+        slope_reward = rolling_slope(recent_rewards, 1000)
+        slope_success = rolling_slope(recent_success, 1000)
+        mean_r = np.mean(recent_rewards)
+        std_r = np.std(recent_rewards)
+        success_rate = np.mean(recent_success)
+        rel_mean = mean_r / (max_possible + 1e-8)
+        rel_std = std_r / (max_possible + 1e-8)
+        slope_r_norm = (slope_reward or 0) / (max_possible + 1e-8)
+
         # This should trend towards 1.0 as agent learns to clear mazes reliably
         success_rate = np.mean(recent_success) if recent_success else 0.0
+
+        saveStateParams = SaveStateParams(
+            state_dict=agent.model.state_dict(),
+            stage_name=stage_name,
+            current_spec=current_spec,
+            pretrained_path=pretrained_path,
+            episodes=episodes,
+            max_possible=max_possible,
+            success_rate=success_rate,
+            avg=avg,
+            std=std,
+            model_name="last_model.pt",
+            replay_buffer=agent.memory,
+            output_dir=f"{output_dir}",
+        )
 
         # --- Target update ---
         if ep > 0 and ep % 20 == 0:
             agent.update_target()
 
         if ep > 0 and ep % 50 == 0:
-            save_state(
-                agent.model.state_dict(),
-                stage_name,
-                current_spec,
-                pretrained_path,
-                episodes,
-                max_possible,
-                success_rate,
-                avg,
-                std,
-                model_name="last_model.pt",
-                replay_buffer=agent.memory,
-                output_dir=f"{output_dir}",
-            )
+            save_state(saveStateParams)
 
-            total_episode_time = time.time() - episode_start
-            replay_buffer_report = agent.memory.report()
-            avg_replay_time = replay_total_time / max(replay_calls, 1)
             print(
-                f"Episode {ep:4d} | reward={total_reward:6.2f} | success_rate_100={success_rate*100:5.1f}% | reward/avg_100={avg:6.2f} | reward/std_100={std:5.2f} "
-                f"| rel_std={rel_std*100:4.2f}% | eps={epsilon:.3f} | progress={progress*100:5.1f}% | total_steps={total_steps:,} "
+                f"Episode {ep:4d} | reward={total_reward:6.2f} | success_rate_100={success_rate*100:5.1f}% | reward/avg_100={avg:6.2f} | reward/std_100={std:5.2f} | rel_std={rel_std:4.2f} | slope_r_norm={slope_r_norm:8.5f} "
+                f"| rel_mean={rel_mean:4.2f}% | eps={epsilon:.3f} | progress={progress*100:5.1f}% | total_steps={total_steps:,} "
                 f"| episode_time={total_episode_time:.2f}s | len(recent_rewards)={len(recent_rewards)} | replay_buffer_report={replay_buffer_report} |  replay_avg={avg_replay_time:.4f}s | replay_total={replay_total_time:.4f}s"
             )
 
             # --- Best model tracking ---
-            avg_change = abs(avg - best_mean)
+            # avg_change = abs(avg - best_mean)
             if avg > best_mean + 0.01:
                 print("saving for new best model with avg reward:", avg)
                 best_mean = avg
-                save_state(
-                    agent.model.state_dict(),
-                    stage_name,
-                    current_spec,
-                    pretrained_path,
-                    episodes,
-                    max_possible,
-                    success_rate,
-                    avg,
-                    std,
-                    model_name="best_model.pt",
-                    replay_buffer=agent.memory,
-                    output_dir=f"{output_dir}",
-                )
+                saveStateParams.model_name = "best_model.pt"
+                save_state(saveStateParams)
                 no_improve_counter = 0
             else:
                 no_improve_counter += 1
@@ -373,17 +374,6 @@ def train_stage(
             # --- Early stopping logic ---
             if len(recent_rewards) >= 200 and ep >= min_train_episodes:
                 ready_to_save = False
-
-                slope_reward = rolling_slope(recent_rewards, 1000)
-                slope_success = rolling_slope(recent_success, 1000)
-                mean_r = np.mean(recent_rewards)
-                std_r = np.std(recent_rewards)
-                success_rate = np.mean(recent_success)
-
-                # --- Normalized metrics ---
-                rel_mean = mean_r / (max_possible + 1e-8)
-                rel_std = std_r / (max_possible + 1e-8)
-                slope_r_norm = (slope_reward or 0) / (max_possible + 1e-8)
 
                 if success_rate >= 0.97 and rel_mean >= 0.90 and rel_std <= 0.12:
                     print(f"✅ Solved: succ={success_rate:.3f}, rel_mean={rel_mean:.2f}, rel_std={rel_std:.2f}")
@@ -398,20 +388,8 @@ def train_stage(
                     ready_to_save = True
 
                 if ready_to_save:
-                    save_state(
-                        agent.model.state_dict(),
-                        stage_name,
-                        current_spec,
-                        pretrained_path,
-                        episodes,
-                        max_possible,
-                        success_rate,
-                        mean_r,
-                        std_r,
-                        model_name="final_model.pt",
-                        replay_buffer=agent.memory,
-                        output_dir=output_dir,
-                    )
+                    saveStateParams.model_name = "final_model.pt"
+                    save_state(saveStateParams)
                     env.close()
                     return agent
 
@@ -419,9 +397,13 @@ def train_stage(
             writer.add_scalar("reward/episode", total_reward, ep)
             writer.add_scalar("reward/avg_100", np.mean(recent_rewards), ep)
             writer.add_scalar("reward/std_100", np.std(recent_rewards), ep)
+            writer.add_scalar("convergence/rate", success_rate, ep)
+            writer.add_scalar("convergence/rel_mean", rel_mean, ep)
+            writer.add_scalar("convergence/rel_std", rel_std, ep)
+            writer.add_scalar("convergence/slope_reward_norm", slope_r_norm, ep)
+            writer.add_scalar("convergence/slope_success", slope_success or 0.0, ep)
             writer.add_scalar("exploration/epsilon", epsilon, ep)
-            writer.add_scalar("memory/fill_ratio", len(agent.memory) / agent.memory.maxlen, ep)
-            writer.add_scalar("success/rate", success_rate, ep)
+            writer.add_scalar("exploration/fill_ratio", len(agent.memory) / agent.memory.maxlen, ep)
             writer.add_scalar("replay/prior_samples", prior_replay_samples, ep)
 
         # Prepare next episode (potentially with fresh layout)
@@ -445,20 +427,8 @@ def train_stage(
     # --- Training complete fallback ---
     env.close()
     print(f"✅ Training complete for {stage_name}")
-    save_state(
-        agent.model.state_dict(),
-        stage_name,
-        current_spec,
-        pretrained_path,
-        episodes,
-        max_possible,
-        success_rate,
-        avg,
-        std,
-        model_name="final_model.pt",
-        replay_buffer=agent.memory,
-        output_dir=f"{output_dir}",
-    )
+    saveStateParams.model_name = "final_model.pt"
+    save_state(saveStateParams)
     writer.close()
     return agent
 
