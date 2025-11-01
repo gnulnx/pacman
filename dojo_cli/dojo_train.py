@@ -1,5 +1,8 @@
 # dojo_train.py
+import cProfile
+import io
 import os
+import pstats
 
 import click
 
@@ -14,6 +17,20 @@ from .dojo_samplers import (  # noqa
     lattice_cluster_sampler,
     random_episode_sampler,
 )
+
+
+def profile_this(func, *args, **kwargs):
+    pr = cProfile.Profile()
+    pr.enable()
+    result = func(*args, **kwargs)
+    pr.disable()
+
+    s = io.StringIO()
+    ps = pstats.Stats(pr, stream=s).sort_stats("cumtime")
+    ps.print_stats(30)  # top 30 slowest functions
+    print("\n===== PROFILER SUMMARY =====\n")
+    print(s.getvalue())
+    return result
 
 
 @click.group()
@@ -35,10 +52,10 @@ def cli():
 @click.option("--eps-end", default=0.05, help="Ending epsilon for epsilon-greedy.")
 @click.option("--densities", default="0.1,0.5,1.0", help="Comma-separated list of pellet densities to train on.")
 @click.option(
-    "--tbarl-mode",
-    default=1,
-    type=int,
-    help="TBARL mode: 1) Sample from previous buffers for regression stop AND add those samples to the current buffer  0) Sample from previous buffers for regression stop ONLY",
+    "--tbarl",
+    default=None,
+    type=float,
+    help="TBARL: Teacher Brain Assisted Reinforcement Learning mode. Fraction of episodes to sample from previous replay buffers.",
 )
 @click.option(
     "--sampler-type",
@@ -46,6 +63,7 @@ def cli():
     type=click.Choice(["random", "cluster", "lattice_cluster"]),
     help='Type of sampler to use: "random", "cluster", or "lattice_cluster".',
 )
+@click.option("--pellet-counts", default="", type=str, help="Comma-separated list of pellet counts to limit mazes to.")
 @click.option("--max-steps-per-episode", default=200, help="Max steps per episode.")
 def train(
     curriculum,
@@ -59,13 +77,17 @@ def train(
     eps_start,
     eps_end,
     densities,
-    tbarl_mode,
+    tbarl,
     sampler_type,
+    pellet_counts,
     max_steps_per_episode,
 ):
     """Train a model using a predefined curriculum."""
 
     densities = [float(x.strip()) for x in densities.split(",")]
+    print("pellet_counts.split():", pellet_counts.split(","))
+    if pellet_counts:
+        pellet_counts = [int(x.strip()) for x in pellet_counts.split(",")]
 
     # ensrue prev_model is a directory
     if prev_model_dir and not os.path.isdir(prev_model_dir):
@@ -96,14 +118,28 @@ def train(
     prev_final = None or prev_model
     agent = None
 
-    for density in densities:
-        print(
-            f"{width}x{height} - running  density=({density}) on densities=({densities}) using sampler={sampler_type}"
-        )
+    loop_mode = "pellets" if pellet_counts else "densities"
+    items = pellet_counts if loop_mode == "pellets" else densities
+
+    print("items to loop over:", items)
+
+    for val in items:
+        if loop_mode == "pellets":
+            pellet_count = val
+            density = 1.0  # fixed density, overridden by explicit pellet count
+            label = f"pellets_{pellet_count}"
+        else:
+            pellet_count = None
+            density = val
+            label = f"density_{density}"
+
+        print(f"{width}x{height} - running {label} using sampler={sampler_type}")
+
         sampler = sampler_func(
             MazeSpec(width=width, height=height, pellet_mode="custom", surround_walls=True),
             randomize_pacman=True,
             pellet_density=density,
+            pellet_count=pellet_count,
         )
 
         agent = train_stage(
@@ -118,10 +154,28 @@ def train(
             replay_batch_size=replay_batch_size,
             replay_buffer_size=replay_buffer_size,
             output_dir=output_dir,
-            prev_replay_buffers={replay_buffer: 1.0},  # prop of 1.0 since only one buffer
-            TBARLMode=tbarl_mode,
+            prev_replay_buffer=replay_buffer,  # prop of 1.0 since only one buffer
+            TBARL=tbarl,
             max_steps_per_episode=max_steps_per_episode,
         )
+        # uncomment here to profile individual density runs
+        # agent = profile_this(
+        #     train_stage,
+        #     stage_name=f"density_{density}",
+        #     maze_spec=MazeSpec(width=width, height=height, pellet_mode="custom", surround_walls=True),
+        #     pretrained_path=prev_final,
+        #     spec_sampler=sampler,
+        #     eps_start=eps_start,
+        #     eps_end=eps_end,
+        #     episodes=episodes,
+        #     agent=agent,
+        #     replay_batch_size=replay_batch_size,
+        #     replay_buffer_size=replay_buffer_size,
+        #     output_dir=output_dir,
+        #     prev_replay_buffers={replay_buffer: 1.0},  # prop of 1.0 since only one buffer
+        #     TBARLMode=tbarl_mode,
+        #     max_steps_per_episode=max_steps_per_episode,
+        # )
         prev_final = f"{output_dir}/density_{density}/final_model.pt"
         replay_buffer = f"{output_dir}/density_{density}/replay_buffer.pkl"
         print("completed density:", density)

@@ -13,7 +13,11 @@ from pacman_env import MazeSpec
 # ============================================================
 
 
-def _random_pellets(base_spec: MazeSpec, pellet_density: Optional[float]) -> List[Tuple[int, int]]:
+def _random_pellets(
+    base_spec: MazeSpec,
+    pellet_density: Optional[float],
+    pellet_count: Optional[int],
+) -> List[Tuple[int, int]]:
     """
     Generate a random pellet configuration based on pellet_mode and density.
     Always returns at least one pellet.
@@ -31,6 +35,9 @@ def _random_pellets(base_spec: MazeSpec, pellet_density: Optional[float]) -> Lis
         # Fallback to base_spec default
         pellet_positions = base_spec.pellet_positions
 
+    if pellet_count is not None:
+        pellet_positions = pellet_positions[:pellet_count]
+
     return pellet_positions
 
 
@@ -42,10 +49,12 @@ def _render_ascii(spec: MazeSpec) -> str:
     for x, y in spec.pellet_positions:
         if 0 <= x < w and 0 <= y < h:
             grid[y][x] = "•"
+            print("placed pellet at:", x, y)
 
     px, py = spec.pacman_start
     if 0 <= px < w and 0 <= py < h:
         grid[py][px] = "P"
+        print("placed pacman at:", px, py)
 
     horizontal = "─" * w
     lines = ["┌" + horizontal + "┐"]
@@ -66,6 +75,8 @@ def random_episode_sampler(
     randomize_pacman: bool = True,
     randomize_single_target: bool = True,
     pellet_density: Optional[float] = None,
+    pellet_count: Optional[int] = None,
+    **kwargs,
 ) -> Callable[[], MazeSpec]:
     """
     Return a callable sampler that produces randomized MazeSpecs.
@@ -82,7 +93,10 @@ def random_episode_sampler(
                 candidates = [pos for pos in coords if pos != pacman_start]
                 pellet_positions = [random.choice(candidates)] if candidates else [pacman_start]
         elif pellet_density is not None:
-            pellet_positions = _random_pellets(base_spec, pellet_density)
+            pellet_positions = _random_pellets(base_spec, pellet_density, pellet_count)
+
+        if pellet_count is not None:
+            pellet_positions = pellet_positions[:pellet_count]
 
         return replace(
             base_spec,
@@ -99,21 +113,43 @@ def random_episode_sampler(
 # ============================================================
 
 
-def cluster_sampler(base_spec: MazeSpec, n_clusters=128, n_samples=1_000_000, **kwargs):
+def cluster_sampler(
+    base_spec: MazeSpec,
+    n_clusters=128,
+    n_samples=1_000_000,
+    pellet_density=None,
+    pellet_count=None,  # count of pellets
+    **kwargs,
+):
     """Sample random mazes, cluster them by features, and return a callable sampler."""
     maze_specs = []
     features = []
     start = time.time()
-    print(f"generating {n_samples} samples for clustering...")
+
+    print(f"cluster_sampler: generating {n_samples} samples...")
+
     for _ in range(n_samples):
-        spec = random_episode_sampler(base_spec, **kwargs)()
+
+        spec = random_episode_sampler(base_spec, pellet_density=pellet_density, pellet_count=pellet_count, **kwargs)()
+        if pellet_count is not None:
+            spec = replace(spec, pellet_positions=spec.pellet_positions[:pellet_count])
+
+        if spec.pellet_positions:
+            xs = [x for x, y in spec.pellet_positions]
+            ys = [y for x, y in spec.pellet_positions]
+            mean_x, mean_y = np.mean(xs), np.mean(ys)
+            var_x, var_y = np.var(xs), np.var(ys)
+        else:
+            mean_x = mean_y = 0.0
+            var_x = var_y = 0.0
+
         f = [
             spec.width * spec.height,
             len(spec.pellet_positions) / (spec.width * spec.height),
-            np.mean([x for x, y in spec.pellet_positions]),
-            np.mean([y for x, y in spec.pellet_positions]),
-            np.var([x for x, y in spec.pellet_positions]),
-            np.var([y for x, y in spec.pellet_positions]),
+            mean_x,
+            mean_y,
+            var_x,
+            var_y,
             spec.pacman_start[0],
             spec.pacman_start[1],
         ]
@@ -135,6 +171,20 @@ def cluster_sampler(base_spec: MazeSpec, n_clusters=128, n_samples=1_000_000, **
     idx = 0
     print("total clusters with samples:", len(cluster_keys))
     print("clustering done in {:.2f}s".format(time.time() - start))
+
+    # --- visualize a few random cluster samples ---
+    # print(f"Previewing {min(10, len(clusters))} cluster samples before continuing:")
+    # for i, (key, specs) in enumerate(clusters.items()):
+    #     if i >= 10:
+    #         break
+    #     print(f"\nCluster {key} ({len(specs)} samples)")
+    #     for _ in range(5):
+    #         sample_spec = random.choice(specs)
+    #         ascii_output = _render_ascii(sample_spec)
+    #         print(ascii_output)
+    #     input("Press Enter to view next cluster...")
+
+    # print("✅ Cluster preview complete.")
 
     def sampler():
         """Cycle through clusters and return random sample from each (skipping empty ones)."""
@@ -161,6 +211,7 @@ def lattice_cluster_sampler(
     n_clusters=128,
     pellet_density=None,
     total_samples=1_000_000,
+    pellet_count=None,
     **kwargs,
 ):
     """
@@ -190,7 +241,9 @@ def lattice_cluster_sampler(
     t0 = time.time()
     for i, pac_start in enumerate(coords):
         for _ in range(per_start):
-            pellet_positions = _random_pellets(base_spec, pellet_density)
+            pellet_positions = _random_pellets(base_spec, pellet_density, pellet_count)
+            if pellet_count is not None:
+                pellet_positions = pellet_positions[:pellet_count]
             spec = replace(
                 base_spec,
                 pacman_start=pac_start,
@@ -228,6 +281,20 @@ def lattice_cluster_sampler(
         clusters = {k: v for k, v in clusters.items() if v}
         print(f"Total clusters with samples: {len(clusters)}")
         print(f"Clustering done in {time.time() - start:.1f}s")
+
+    # --- visualize a few random cluster samples ---
+    # print(f"Previewing {min(100, len(clusters))} cluster samples before continuing:")
+    # for i, (key, specs) in enumerate(clusters.items()):
+    #     if i >= 10:
+    #         break
+    #     print(f"\nCluster {key} ({len(specs)} samples)")
+    #     for _ in range(5):
+    #         sample_spec = random.choice(specs)
+    #         ascii_output = _render_ascii(sample_spec)
+    #         print(ascii_output)
+    #     input("Press Enter to view next cluster...")
+
+    # print("✅ Cluster preview complete.")
 
     cluster_keys = list(clusters.keys())
     idx = 0

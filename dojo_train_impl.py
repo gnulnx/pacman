@@ -103,19 +103,6 @@ def rolling_slope(series, window=500):
     return np.sum(xs * ys) / denom
 
 
-def _label_from_path(path: str, idx: int = 0) -> str:
-    """Generate a readable label (e.g., stage25_replay_buffer) from path or fallback to teacher_{idx}."""
-    base = os.path.basename(path)
-    parent = os.path.basename(os.path.dirname(path))
-    if base.endswith(".pkl"):
-        base = base[:-4]
-    if parent:
-        label = f"{parent}_{base}"
-    else:
-        label = base or f"teacher_{idx}"
-    return label[:40]  # truncate for safety
-
-
 def train_stage(
     stage_name,
     maze_spec: MazeSpec,
@@ -129,11 +116,11 @@ def train_stage(
     replay_batch_size=64,
     replay_buffer_size=100000,
     max_steps_per_episode: Optional[int] = None,
-    prev_replay_buffers: Optional[deque] = None,
+    prev_replay_buffer: Optional[deque] = None,
     output_dir="runs",
     decay_mode="exponential",  # "linear" or "exponential"
     Env=PacmanEnv,
-    TBARLMode=1,  # 1) Sample from previous buffers for regression stop AND add those samples to the current buffer  0) Sample from previous buffers for regression stop ONLY
+    TBARL=None,  # 1) Sample from previous buffers for regression stop AND add those samples to the current buffer  0) Sample from previous buffers for regression stop ONLY
 ):
     """
     Train a DQN agent on a given Pac-Man maze with robust convergence detection.
@@ -150,28 +137,18 @@ def train_stage(
     print("Loading replay buffers")
     start = time.time()
 
-    if prev_replay_buffers:
-        if isinstance(prev_replay_buffers, dict):
-            total_p = sum(prev_replay_buffers.values())
-            for i, (path, prob) in enumerate(prev_replay_buffers.items()):
-                if os.path.exists(path):
-                    with open(path, "rb") as f:
-                        buf = pickle.load(f)
-                    label = _label_from_path(path, i)
-                    loaded_prev_buffers.append((buf, prob / total_p, label))
-        elif isinstance(prev_replay_buffers, str):
-            path = prev_replay_buffers
-            if os.path.exists(path):
-                with open(path, "rb") as f:
-                    buf = pickle.load(f)
-                label = _label_from_path(path, 0)
-                loaded_prev_buffers.append((buf, 1.0, label))
+    # --- Load previous buffer only if TBARL active and file provided ---
+    loaded_prev_buffer = None
+    if TBARL and prev_replay_buffer:
+        path = prev_replay_buffer
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                loaded_prev_buffer = pickle.load(f)
+            print(f"Loaded teacher buffer: {path} ({len(loaded_prev_buffer)} samples)")
 
-    total_time = time.time() - start
     labels = [label for *_, label in loaded_prev_buffers]
     print(f"Loaded replay buffers: {labels}")
-    print(f"Time taken to load replay buffers: {total_time:.2f}s")
-    print("TBARL Mode:", TBARLMode)
+    print("TBARL:", TBARL)
 
     # --- Environment setup ---
     current_spec = spec_sampler() if spec_sampler is not None else maze_spec
@@ -197,6 +174,9 @@ def train_stage(
     # --- Setup the agent with appropriate memory size ---
     if agent is None:
         agent = Agent(obs_shape, n_actions, memory_size=replay_buffer_size)
+    else:
+        # Since you are reusing the agent it's important to reset optimizer state
+        agent.optimizer = torch.optim.Adam(agent.model.parameters(), lr=agent.lr)
 
     # --- Optional weight transfer ---
     if pretrained_path and os.path.exists(pretrained_path):
@@ -219,12 +199,6 @@ def train_stage(
         except Exception as e:
             print(f"⚠️ Could not read previous spec for auto-freeze: {e}")
 
-        # 🧠 Reset optimizer & exploration to adapt to new stage dynamics
-        # Since you are reusing the agent it's important to reset optimizer state
-        agent.optimizer = torch.optim.Adam(agent.model.parameters(), lr=agent.lr)  # clear old momentum
-        agent.eps_start = 0.5  # restart exploration higher for the new stage
-        agent.eps = agent.eps_start
-
     # --- Adjust replay buffer size if needed ---
     if replay_buffer_size != agent.memory.maxlen:
         print(f"🔄 Growing replay buffer from {agent.memory.maxlen} → {replay_buffer_size}")
@@ -232,8 +206,6 @@ def train_stage(
         for t in agent.memory:  # preserves (s,a,r,s',done[,origin])
             new_rb.push(t if len(t) == 6 else t, origin=(t[5] if len(t) == 6 else "self"))
         agent.memory = new_rb
-
-    agent.steps = 0  # reset epsilon decay counter
 
     os.makedirs(f"runs/{stage_name}", exist_ok=True)
     print(f"🚀 Starting training for {stage_name} ({current_spec.width}x{current_spec.height})")
@@ -284,6 +256,8 @@ def train_stage(
         total_reward = 0
         steps_in_ep = 0
         prior_replay_samples = 0
+        replay_total_time = 0
+        replay_calls = 0
 
         render_this_episode = ep % 100 == 0
         while not done:
@@ -301,44 +275,19 @@ def train_stage(
             total_steps += 1
 
             # Learn periodically
-            # --- Possibly sample from past buffers ---
-            # --- TBARL: occasionally cross-sample from teacher replay buffers ---
-            if loaded_prev_buffers and random.random() < 0.25:  # 25% chance to activate TBARL this step
-                # Choose which prior buffer based on probabilities
-                r = random.random()
-                cum = 0.0
-                sample_buf, label = None, None
-
-                for buf, prob, lbl in loaded_prev_buffers:
-                    cum += prob
-                    if r <= cum:
-                        sample_buf, label = buf, lbl
-                        break
-
-                # Fallback: if rounding or zero weights left sample_buf unset
-                if sample_buf is None:
-                    sample_buf, _, label = loaded_prev_buffers[-1]
-
-                # --- Sample and train on teacher experiences ---
-                if len(sample_buf) > 0:
-                    samples = random.sample(sample_buf, min(len(sample_buf), replay_batch_size))
-                    agent.replay(batch_size=replay_batch_size, buffer=samples)
-
-                    # Optionally inject some into current buffer
-                    if TBARLMode == 1:
-                        counts = agent.memory.counts()
-                        total = max(counts["total"], 1)
-                        self_frac = counts["self"] / total
-
-                        # only add if self samples are more than 50%.  This will keep buffer balanced
-                        if self_frac > 0.5:
-                            prior_replay_samples += len(samples)
-                            # Optionally subsample to limit teacher dominance
-                            for exp in samples:
-                                agent.remember(exp, origin=label)
+            # --- TBARL: percent time to cross-sample from teacher replay buffers ---
+            if loaded_prev_buffers and random.random() < TBARL:  # 25% chance to activate TBARL this step
+                samples = random.sample(loaded_prev_buffers, min(len(loaded_prev_buffers), replay_batch_size))
+                replay_total_time = agent.replay(batch_size=replay_batch_size, buffer=samples)
+                if replay_total_time:
+                    replay_total_time += replay_total_time
+                    replay_calls += 1
             else:
                 # Standard self replay
-                agent.replay(batch_size=replay_batch_size)
+                replay_total_time = agent.replay(batch_size=replay_batch_size)
+                if replay_total_time:
+                    replay_total_time += replay_total_time
+                    replay_calls += 1
 
             if render_this_episode and not env.headless:
                 print("Rendering episode", ep)
@@ -391,10 +340,11 @@ def train_stage(
 
             total_episode_time = time.time() - episode_start
             replay_buffer_report = agent.memory.report()
+            avg_replay_time = replay_total_time / max(replay_calls, 1)
             print(
                 f"Episode {ep:4d} | reward={total_reward:6.2f} | success_rate_100={success_rate*100:5.1f}% | reward/avg_100={avg:6.2f} | reward/std_100={std:5.2f} "
                 f"| rel_std={rel_std*100:4.2f}% | eps={epsilon:.3f} | progress={progress*100:5.1f}% | total_steps={total_steps:,} "
-                f"| episode_time={total_episode_time:.2f}s | len(recent_rewards)={len(recent_rewards)} | replay_buffer_report={replay_buffer_report}"
+                f"| episode_time={total_episode_time:.2f}s | len(recent_rewards)={len(recent_rewards)} | replay_buffer_report={replay_buffer_report} |  replay_avg={avg_replay_time:.4f}s | replay_total={replay_total_time:.4f}s"
             )
 
             # --- Best model tracking ---

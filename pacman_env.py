@@ -424,56 +424,6 @@ class Ghost:
         ]
 
 
-class AgentEnv:
-    def __init__(self, width=8, height=8, surround_walls=True, max_steps=None):
-        # This is just a placeholder environment for testing agents
-        self.width = width
-        self.height = height
-        self.surround_walls = surround_walls
-        self.max_steps = max_steps or width * height * 10
-        self.reset()
-
-    def reset(self):
-        # position agent at random start
-        self.agent_pos = (np.random.randint(self.width), np.random.randint(self.height))
-        self.visited = np.zeros((self.height, self.width), dtype=np.float32)
-        self._step_counter = 0
-        return self._get_state()
-
-    def _get_state(self):
-        grid = np.zeros((1, self.height, self.width), dtype=np.float32)
-        x, y = self.agent_pos
-        grid[0, y, x] = 1.0
-        return {"grid": grid}
-
-    def _move(self, action):
-        dxdy = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-        dx, dy = dxdy[action]
-        x, y = self.agent_pos
-        nx, ny = np.clip(x + dx, 0, self.width - 1), np.clip(y + dy, 0, self.height - 1)
-        self.agent_pos = (nx, ny)
-
-    def step(self, action):
-        raise NotImplementedError
-
-
-class CuriosityEnv(AgentEnv):
-    def step(self, action):
-        self._move(action)
-        self._step_counter += 1
-        x, y = self.agent_pos
-
-        # intrinsic curiosity reward = how new is this tile?
-        novelty = 1.0 - np.tanh(self.visited[y, x])
-        reward = novelty
-        self.visited[y, x] += 1.0
-
-        done = self._step_counter >= self.max_steps
-        state = self._get_state()
-        info = {"novelty": novelty, "visited_fraction": (self.visited > 0).mean()}
-        return state, reward, done, info
-
-
 class PacmanEnv:
     """Gym-style environment exposing reset, step, and render interfaces."""
 
