@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dojo"
+version = "0.1.0"
+description = "Pacman Dojo RL training CLI"
+authors = [{ name = "John Furr" }]
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+
+# ✅ All dependencies that your code actually imports
+dependencies = [
+    "click>=8.1",
+    "torch>=2.0",
+    "numpy>=1.20",
+    "pygame>=2.1",
+    "pillow>=12.0.0",
+    "pytest>=8.4.2",
+    "pyclean>=3.2.0",
+]
+
+[project.scripts]
+# This exposes `dojo` as a CLI command globally
+dojo = "dojo:main"
+
+[tool.setuptools]
+# Explicitly include top-level single-module files
+py-modules = [
+    "dojo",
+    "dojo_train_impl",
+    "dojo_agent",
+    "dojo_config",
+    "eval_agent",
+    "pacman_env",
+    "pacman_mapgen",
+    "failed_run_recorder",
+]
+
+[tool.setuptools.packages.find]
+# Automatically include your CLI package but exclude local data dirs
+include = ["dojo_cli"]
+exclude = ["runs*", "failed_runs*", "evaluated_models*", "tests*"]
+
+[tool.setuptools.package-data]
+# (Optional) include extra files like images or JSON logs if you want them in the wheel
+dojo_cli = ["*.png", "*.json", "*.jsonl"]
